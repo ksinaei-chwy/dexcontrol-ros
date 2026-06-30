@@ -14,10 +14,11 @@ This module provides classes for various auxiliary robot components such as Batt
 EStop (emergency stop), and Heartbeat.
 """
 
+from collections.abc import Mapping
 import os
 import threading
 import time
-from typing import cast
+from typing import Any, cast
 
 from dexbot_utils import RobotInfo
 from dexbot_utils.configs.components.vega_1 import (
@@ -81,7 +82,7 @@ class Battery(RobotComponent):
 
         while not self._shutdown_event.is_set():
             try:
-                state = self._subscriber.get_latest()
+                state = self._unwrap_message_payload(self._subscriber.get_latest())
                 if state is not None:
                     battery_level = float(state["percentage"])
                     if battery_level < 20:
@@ -106,7 +107,7 @@ class Battery(RobotComponent):
                 - voltage: Battery voltage
                 - power: Power consumption in Watts
         """
-        state = self._subscriber.get_latest()
+        state = self._unwrap_message_payload(self._subscriber.get_latest())
         if state is None:
             return {
                 "percentage": 0.0,
@@ -125,7 +126,7 @@ class Battery(RobotComponent):
 
     def show(self) -> None:
         """Displays the current battery status as a formatted table with color indicators."""
-        state = self._subscriber.get_latest()
+        state = self._unwrap_message_payload(self._subscriber.get_latest())
 
         table = Table(title="Battery Status")
         table.add_column("Parameter", style="cyan")
@@ -259,6 +260,17 @@ class EStop(RobotComponent):
         self._monitor_thread = threading.Thread(target=self._estop_monitor, daemon=True)
         self._monitor_thread.start()
 
+    @staticmethod
+    def _state_payload(state: Any) -> Mapping[str, Any] | None:
+        """Return decoded e-stop state from Dexcomm Message or dict payloads."""
+        if state is None:
+            return None
+        data = RobotComponent._unwrap_message_payload(state)
+        if isinstance(data, Mapping):
+            return data
+        logger.debug(f"Unexpected EStop state payload type: {type(data).__name__}")
+        return None
+
     def _estop_monitor(self) -> None:
         """Background thread that continuously monitors EStop button state."""
         # Wait for first data to arrive before monitoring
@@ -269,7 +281,7 @@ class EStop(RobotComponent):
 
         while not self._shutdown_event.is_set():
             try:
-                state = self._subscriber.get_latest()
+                state = self._state_payload(self._subscriber.get_latest())
                 if state is not None:
                     button_pressed = (
                         state.get("left_base_estop_enabled", False)
@@ -316,7 +328,7 @@ class EStop(RobotComponent):
                 - button_pressed: EStop button pressed
                 - software_estop_enabled: Software EStop enabled
         """
-        state = self._subscriber.get_latest()
+        state = self._state_payload(self._subscriber.get_latest())
         if state is None:
             return {
                 "button_pressed": False,
@@ -340,7 +352,7 @@ class EStop(RobotComponent):
             True if any hardware E-Stop button (left base, right base, torso,
             or remote) is currently pressed, False otherwise.
         """
-        state = self._subscriber.get_latest()
+        state = self._state_payload(self._subscriber.get_latest())
         if state is None:
             return False
         button_pressed = (
@@ -357,7 +369,7 @@ class EStop(RobotComponent):
         Returns:
             True if the software E-Stop is currently active, False otherwise.
         """
-        state = self._subscriber.get_latest()
+        state = self._state_payload(self._subscriber.get_latest())
         if state is None:
             return False
         return state["software_estop_enabled"]

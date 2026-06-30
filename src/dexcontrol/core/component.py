@@ -82,6 +82,18 @@ class RobotComponent:
             raise ServiceUnavailableError(
                 f"No state data available for {self.__class__.__name__}"
             )
+        return self._unwrap_message_payload(state)
+
+    @staticmethod
+    def _unwrap_message_payload(state: Any) -> Any:
+        """Return the decoded payload from DexComm Message wrappers.
+
+        DexComm 0.6 returns a ``Message`` object from ``get_latest()`` with the
+        decoded payload in ``Message.data``. Older versions returned the decoded
+        payload directly.
+        """
+        if type(state).__name__ == "Message" and hasattr(state, "data"):
+            return state.data
         return state
 
     def wait_for_active(self, timeout: float = 5.0) -> bool:

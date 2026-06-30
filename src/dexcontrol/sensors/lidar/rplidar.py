@@ -14,6 +14,7 @@ This module provides LIDAR sensor classes that use the specialized LIDAR
 subscriber for scan data.
 """
 
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
@@ -47,6 +48,12 @@ class RPLidarSensor:
             topic=configs.topic
         )
 
+    @staticmethod
+    def _payload(data: Any) -> Mapping[str, Any] | None:
+        if data is None:
+            return None
+        payload = getattr(data, "data", data)
+        return payload if isinstance(payload, Mapping) else None
 
     def shutdown(self) -> None:
         """Shutdown the LIDAR sensor."""
@@ -83,8 +90,7 @@ class RPLidarSensor:
                 - qualities: Array of quality values (0-255) if available, None otherwise
                 - timestamp: Timestamp in nanoseconds (int)
         """
-        data = self._subscriber.get_latest()
-        return data
+        return self._payload(self._subscriber.get_latest())
 
     def get_ranges(self) -> np.ndarray | None:
         """Get the latest range measurements.
@@ -92,7 +98,7 @@ class RPLidarSensor:
         Returns:
             Array of range measurements in meters if available, None otherwise.
         """
-        data = self._subscriber.get_latest()
+        data = self.get_obs()
         return data['ranges'] if data else None
 
     def get_angles(self) -> np.ndarray | None:
@@ -101,7 +107,7 @@ class RPLidarSensor:
         Returns:
             Array of angle measurements in radians if available, None otherwise.
         """
-        data = self._subscriber.get_latest()
+        data = self.get_obs()
         return data['angles'] if data else None
 
     def get_qualities(self) -> np.ndarray | None:
@@ -110,7 +116,7 @@ class RPLidarSensor:
         Returns:
             Array of quality values (0-255) if available, None otherwise.
         """
-        data = self._subscriber.get_latest()
+        data = self.get_obs()
         return data['intensities'] if data else None
 
     def get_point_count(self) -> int:

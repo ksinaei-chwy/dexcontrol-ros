@@ -14,6 +14,7 @@ This module provides a 3D LIDAR sensor class that uses the Lidar3DCodec
 for efficient point cloud data handling.
 """
 
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
@@ -54,6 +55,13 @@ class Lidar3DSensor:
             decoder=Lidar3DCodec.decode,
             topic=configs.topic,
         )
+
+    @staticmethod
+    def _payload(data: Any) -> Mapping[str, Any] | None:
+        if data is None:
+            return None
+        payload = getattr(data, "data", data)
+        return payload if isinstance(payload, Mapping) else None
 
     def shutdown(self) -> None:
         """Shutdown the 3D LIDAR sensor."""
@@ -98,8 +106,7 @@ class Lidar3DSensor:
                 - is_dense: Whether cloud has invalid points
                 - point_count: Total number of points
         """
-        data = self._subscriber.get_latest()
-        return data
+        return self._payload(self._subscriber.get_latest())
 
     def get_points(self) -> np.ndarray | None:
         """Get the latest point cloud as Nx3 array.
@@ -107,7 +114,7 @@ class Lidar3DSensor:
         Returns:
             Array of shape (N, 3) with xyz coordinates if available, None otherwise.
         """
-        data = self._subscriber.get_latest()
+        data = self.get_obs()
         if data is None:
             return None
 
@@ -127,7 +134,7 @@ class Lidar3DSensor:
         Returns:
             Array of shape (N, 4) with xyzi if available, None otherwise.
         """
-        data = self._subscriber.get_latest()
+        data = self.get_obs()
         if data is None:
             return None
 
@@ -148,7 +155,7 @@ class Lidar3DSensor:
         Returns:
             Tuple of (x, y, z) arrays if available, None otherwise.
         """
-        data = self._subscriber.get_latest()
+        data = self.get_obs()
         if data is None:
             return None
 
@@ -167,7 +174,7 @@ class Lidar3DSensor:
         Returns:
             Array of intensity values if available, None otherwise.
         """
-        data = self._subscriber.get_latest()
+        data = self.get_obs()
         return data["intensity"] if data else None
 
     def get_ring(self) -> np.ndarray | None:
@@ -176,7 +183,7 @@ class Lidar3DSensor:
         Returns:
             Array of ring IDs if available, None otherwise.
         """
-        data = self._subscriber.get_latest()
+        data = self.get_obs()
         return data["ring"] if data else None
 
     def get_point_timestamps(self) -> np.ndarray | None:
@@ -185,7 +192,7 @@ class Lidar3DSensor:
         Returns:
             Array of timestamps in nanoseconds if available, None otherwise.
         """
-        data = self._subscriber.get_latest()
+        data = self.get_obs()
         return data["point_timestamps_ns"] if data else None
 
     def get_timestamp(self) -> int | None:
@@ -194,7 +201,7 @@ class Lidar3DSensor:
         Returns:
             Timestamp in nanoseconds if available, None otherwise.
         """
-        data = self._subscriber.get_latest()
+        data = self.get_obs()
         return data["timestamp_ns"] if data else None
 
     def get_point_count(self) -> int:
@@ -203,7 +210,7 @@ class Lidar3DSensor:
         Returns:
             Number of points in the scan, 0 if no data available.
         """
-        data = self._subscriber.get_latest()
+        data = self.get_obs()
         if data is None:
             return 0
         return data.get("point_count", 0)
@@ -214,7 +221,7 @@ class Lidar3DSensor:
         Returns:
             Tuple of (height, width) if available, None otherwise.
         """
-        data = self._subscriber.get_latest()
+        data = self.get_obs()
         if data is None:
             return None
 
@@ -232,7 +239,7 @@ class Lidar3DSensor:
         Returns:
             True if dense, False if contains invalid points or no data.
         """
-        data = self._subscriber.get_latest()
+        data = self.get_obs()
         if data is None:
             return False
         return data.get("is_dense", False)
