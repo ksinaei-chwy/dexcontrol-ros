@@ -29,11 +29,18 @@ Run this inside the ROS/Docker/Conda environment that already has `dexcontrol`
 installed and the Dexmate communication config available. Do not install ROS
 packages into the host Python environment.
 
+Start the robot-side services after every robot boot:
+
+```bash
+dextop node start
+dexsensor launch --sensor lidar
+```
+
 ```bash
 cd dexcontrol/ros_ws
 colcon build --symlink-install
 source install/setup.bash
-ros2 launch dexcontrol_ros dexcontrol_bridge.launch.py
+ros2 launch dexcontrol_ros dexcontrol_bridge.launch.py robot_ip:=192.168.50.20:7447
 ```
 
 The launch file defaults to `robot_name:=dm/vg150fef71c9-1p` and

@@ -36,7 +36,7 @@ docker run --rm -it \
   --privileged \
   -w "/workspaces/$PROJECT_NAME" \
   -e ROBOT_NAME="${ROBOT_NAME:-dm/vg150fef71c9-1p}" \
-  -e ROBOT_IP="${ROBOT_IP:-}" \
+  -e ROBOT_IP="${ROBOT_IP:-192.168.50.20:7447}" \
   -e ZENOH_CONFIG="/root/.dexmate/comm/zenoh/chewy/zenoh_peer_config.json5" \
   -v "$PWD":"/workspaces/$PROJECT_NAME" \
   -v "$HOME/.dexmate":"/root/.dexmate:ro" \
@@ -84,10 +84,25 @@ If your custom image uses a non-root user, prepend `sudo` to the `apt` commands.
 
 ## Hardware Bridge
 
+Before launching ROS from the Jetson/container, start the robot-side Dexmate
+services after every robot boot:
+
+```bash
+dextop node start
+dexsensor launch --sensor lidar
+```
+
+The known Vega endpoint for this setup is:
+
+```bash
+export ROBOT_IP="192.168.50.20:7447"
+```
+
 Default launch values match Vega 1P F5D6:
 
 - `robot_name`: `dm/vg150fef71c9-1p`
 - `zenoh_config`: `$HOME/.dexmate/comm/zenoh/chewy/zenoh_peer_config.json5`
+- `robot_ip`: `192.168.50.20:7447`
 - frames: `map -> odom -> base -> front_lidar/back_lidar`
 
 Run the bridge:
@@ -95,13 +110,13 @@ Run the bridge:
 ```bash
 source /opt/ros/humble/setup.bash
 source "/workspaces/$PROJECT_NAME/ros_ws/install/setup.bash"
-ros2 launch dexcontrol_ros dexcontrol_bridge.launch.py
+ros2 launch dexcontrol_ros dexcontrol_bridge.launch.py robot_ip:="$ROBOT_IP"
 ```
 
-For direct robot endpoint testing:
+You can also pass the direct endpoint explicitly:
 
 ```bash
-ros2 launch dexcontrol_ros dexcontrol_bridge.launch.py robot_ip:=192.168.5.20:7447
+ros2 launch dexcontrol_ros dexcontrol_bridge.launch.py robot_ip:=192.168.50.20:7447
 ```
 
 Check core topics:
@@ -202,6 +217,8 @@ ros2 launch dexmate_vega_moveit_config hardware_moveit.launch.py dry_run:=true
 ## Manual Safety Checklist
 
 - Confirm the Zenoh config exists inside the container.
+- Confirm the robot-side services are running: `dextop node start` and
+  `dexsensor launch --sensor lidar`.
 - Confirm `ros2 topic hz /odom` is stable before mapping or Nav2.
 - Confirm `ros2 topic hz /scan` is stable and the scan lies flat in frame `base`.
 - Confirm `/cmd_vel` is zero before enabling Nav2 goals.
