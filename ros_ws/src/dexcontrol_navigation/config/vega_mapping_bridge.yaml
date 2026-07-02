@@ -1,0 +1,32 @@
+dexcontrol_bridge:
+  ros__parameters:
+    control_rate_hz: 250.0
+    state_publish_rate_hz: 100.0
+    diagnostics_publish_rate_hz: 20.0
+    wrench_publish_rate_hz: 100.0
+    pointcloud_publish_rate_hz: 10.0
+    odom_publish_rate_hz: 50.0
+    tf_publish_rate_hz: 50.0
+    estop_poll_rate_hz: 10.0
+    qos_depth: 10
+
+    enable_joint_commands: true
+    enable_cmd_vel: true
+    cmd_vel_timeout_s: 0.5
+    include_chassis_joint_states: true
+    use_measured_chassis_for_odom: true
+
+    # pointcloud_to_laserscan performs TF lookups at the cloud timestamp. Use ROS
+    # receive time for mapping unless the robot clock is synchronized to ROS time.
+    use_robot_timestamps: false
+
+    lidar_3d_sensors:
+      - lidar_3d_front
+      - lidar_3d_back
+
+    odom_frame: odom
+    base_frame: base
+    lidar_3d_front_frame: front_lidar
+    lidar_3d_back_frame: back_lidar
+    left_ft_frame: L_ee
+    right_ft_frame: R_ee

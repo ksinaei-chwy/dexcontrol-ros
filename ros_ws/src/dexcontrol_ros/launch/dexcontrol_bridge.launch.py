@@ -51,6 +51,11 @@ def generate_launch_description() -> LaunchDescription:
                     "static and joint transforms come from dexmate_vega_description."
                 ),
             ),
+            DeclareLaunchArgument(
+                "config_file",
+                default_value=str(config_file),
+                description="Path to the dexcontrol_bridge ROS parameter file.",
+            ),
             SetEnvironmentVariable("ROBOT_NAME", LaunchConfiguration("robot_name")),
             SetEnvironmentVariable("DM_COMM_CONFIG", LaunchConfiguration("zenoh_config")),
             SetEnvironmentVariable("ZENOH_CONFIG", LaunchConfiguration("zenoh_config")),
@@ -76,7 +81,7 @@ def generate_launch_description() -> LaunchDescription:
                 executable="dexcontrol_bridge",
                 name="dexcontrol_bridge",
                 output="screen",
-                parameters=[str(config_file)],
+                parameters=[LaunchConfiguration("config_file")],
             )
         ]
     )

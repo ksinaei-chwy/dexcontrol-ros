@@ -1,0 +1,16 @@
+dual_lidar_scan_merger:
+  ros__parameters:
+    input_scan_topics:
+      - /lidar_3d_front/scan
+      - /lidar_3d_back/scan
+    output_scan_topic: /scan
+    target_frame: base
+    angle_min: -3.141592653589793
+    angle_max: 3.141592653589793
+    angle_increment: 0.008726646259971648
+    scan_time: 0.2
+    range_min: 0.25
+    range_max: 12.0
+    stale_timeout_s: 0.5
+    publish_rate_hz: 10.0
+    use_inf: true

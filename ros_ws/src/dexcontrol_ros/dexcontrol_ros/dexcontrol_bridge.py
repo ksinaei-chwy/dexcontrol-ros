@@ -52,6 +52,7 @@ class DexcontrolBridge(Node):
         self._lock = threading.Lock()
         self._last_warn_s: dict[str, float] = {}
         self._last_run_ns: dict[str, int] = {}
+        self._lidar_status: dict[str, dict[str, Any]] = {}
         self._last_cmd_vel_time: Time | None = None
         self._cmd_vel = np.zeros(3, dtype=np.float64)
         self._odom_x = 0.0
@@ -79,6 +80,9 @@ class DexcontrolBridge(Node):
         self.joint_state_pub = self.create_publisher(JointState, "joint_states", qos_depth)
         self.joint_feedback_pub = self.create_publisher(
             DiagnosticArray, "dexcontrol/joint_feedback", qos_depth
+        )
+        self.lidar_feedback_pub = self.create_publisher(
+            DiagnosticArray, "dexcontrol/lidar_feedback", qos_depth
         )
         self.odom_pub = self.create_publisher(Odometry, "odom", qos_depth)
         self.pointcloud_pubs: dict[str, Any] = {}
@@ -128,6 +132,7 @@ class DexcontrolBridge(Node):
         self.declare_parameter("diagnostics_publish_rate_hz", 20.0)
         self.declare_parameter("wrench_publish_rate_hz", 100.0)
         self.declare_parameter("pointcloud_publish_rate_hz", 10.0)
+        self.declare_parameter("pointcloud_debug_log_rate_hz", 0.0)
         self.declare_parameter("odom_publish_rate_hz", 50.0)
         self.declare_parameter("tf_publish_rate_hz", 50.0)
         self.declare_parameter("estop_poll_rate_hz", 10.0)
@@ -235,6 +240,23 @@ class DexcontrolBridge(Node):
             sensor = self._get_sensor(str(sensor_name))
             if sensor is not None:
                 self._lidar_3d_sensors[str(sensor_name)] = sensor
+                self._lidar_status[str(sensor_name)] = self._initial_lidar_status()
+
+    def _initial_lidar_status(self) -> dict[str, Any]:
+        return {
+            "status": "discovered",
+            "attempt_count": 0,
+            "publish_count": 0,
+            "same_sequence_count": 0,
+            "point_count": 0,
+            "sequence": None,
+            "timestamp_ns": None,
+            "read_duration_ms": 0.0,
+            "last_attempt_ns": None,
+            "last_publish_ns": None,
+            "last_debug_ns": None,
+            "message": "",
+        }
 
     def _get_sensor(self, sensor_name: str) -> Any | None:
         try:
@@ -418,6 +440,7 @@ class DexcontrolBridge(Node):
             self._publish_joint_state()
         if self._should_run("joint_feedback", "diagnostics_publish_rate_hz"):
             self._publish_joint_feedback()
+            self._publish_lidar_feedback()
         if self._should_run("wrench", "wrench_publish_rate_hz"):
             self._publish_wrenches()
         if self._should_run("pointcloud", "pointcloud_publish_rate_hz"):
@@ -608,18 +631,171 @@ class DexcontrolBridge(Node):
 
     def _publish_pointclouds(self) -> None:
         for sensor_name, sensor in self._lidar_3d_sensors.items():
+            read_start = time.monotonic()
+            self._record_lidar_attempt(sensor_name)
             try:
                 data = sensor.get_obs()
             except Exception as exc:
+                self._record_lidar_status(
+                    sensor_name,
+                    "error",
+                    read_start,
+                    message=str(exc),
+                )
                 self._warn_throttled(
                     f"pointcloud_{sensor_name}", f"Could not read {sensor_name}: {exc}"
                 )
                 continue
             if not data:
+                self._record_lidar_status(
+                    sensor_name,
+                    "no_data",
+                    read_start,
+                    message="get_obs returned no data",
+                )
                 continue
             msg = self._pointcloud2_from_lidar(sensor_name, data)
             if msg is not None:
                 self.pointcloud_pubs[sensor_name].publish(msg)
+                self._record_lidar_status(
+                    sensor_name,
+                    "published",
+                    read_start,
+                    data=data,
+                    point_count=msg.width * msg.height,
+                    published=True,
+                )
+            else:
+                self._record_lidar_status(
+                    sensor_name,
+                    "invalid_cloud",
+                    read_start,
+                    data=data,
+                    message="cloud missing non-empty x/y/z arrays",
+                )
+
+    def _record_lidar_attempt(self, sensor_name: str) -> None:
+        status = self._lidar_status.setdefault(
+            sensor_name, self._initial_lidar_status()
+        )
+        status["attempt_count"] = int(status.get("attempt_count", 0)) + 1
+        status["last_attempt_ns"] = self.get_clock().now().nanoseconds
+
+    def _record_lidar_status(
+        self,
+        sensor_name: str,
+        state: str,
+        read_start: float,
+        data: dict[str, Any] | None = None,
+        point_count: int = 0,
+        published: bool = False,
+        message: str = "",
+    ) -> None:
+        status = self._lidar_status.setdefault(
+            sensor_name, self._initial_lidar_status()
+        )
+        previous_sequence = status.get("sequence")
+        sequence = data.get("sequence") if data else None
+        timestamp_ns = data.get("timestamp_ns") if data else None
+
+        if sequence is not None and sequence == previous_sequence:
+            count = int(status.get("same_sequence_count", 0))
+            status["same_sequence_count"] = count + 1
+        elif sequence is not None:
+            status["same_sequence_count"] = 0
+
+        status["status"] = state
+        status["point_count"] = int(
+            data.get("point_count", point_count) if data else point_count
+        )
+        status["sequence"] = sequence
+        status["timestamp_ns"] = timestamp_ns
+        status["read_duration_ms"] = (time.monotonic() - read_start) * 1000.0
+        status["message"] = message
+
+        if published:
+            status["publish_count"] = int(status.get("publish_count", 0)) + 1
+            status["last_publish_ns"] = self.get_clock().now().nanoseconds
+
+        self._maybe_log_lidar_debug(sensor_name, status)
+
+    def _maybe_log_lidar_debug(self, sensor_name: str, status: dict[str, Any]) -> None:
+        rate_hz = float(self.get_parameter("pointcloud_debug_log_rate_hz").value)
+        if rate_hz <= 0.0:
+            return
+
+        now_ns = self.get_clock().now().nanoseconds
+        last_debug_ns = status.get("last_debug_ns")
+        period_ns = int(1e9 / rate_hz)
+        if last_debug_ns is not None and now_ns - int(last_debug_ns) < period_ns:
+            return
+
+        status["last_debug_ns"] = now_ns
+        last_publish_ns = status.get("last_publish_ns")
+        age_s = (
+            (now_ns - int(last_publish_ns)) / 1e9
+            if last_publish_ns is not None
+            else float("inf")
+        )
+        self.get_logger().info(
+            f"lidar {sensor_name}: status={status.get('status')} "
+            f"points={status.get('point_count')} seq={status.get('sequence')} "
+            f"same_seq={status.get('same_sequence_count')} "
+            f"read_ms={float(status.get('read_duration_ms', 0.0)):.1f} "
+            f"last_publish_age_s={age_s:.2f} msg={status.get('message', '')}"
+        )
+
+    def _publish_lidar_feedback(self) -> None:
+        msg = DiagnosticArray()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.status = [
+            self._lidar_diagnostic(sensor_name, status)
+            for sensor_name, status in self._lidar_status.items()
+        ]
+        self.lidar_feedback_pub.publish(msg)
+
+    def _lidar_diagnostic(
+        self, sensor_name: str, status_data: dict[str, Any]
+    ) -> DiagnosticStatus:
+        status = DiagnosticStatus()
+        status.name = f"dexcontrol/{sensor_name}/pointcloud"
+        status.hardware_id = getattr(self.robot, "robot_name", "dexmate")
+        status.message = str(status_data.get("status", "unknown"))
+
+        now_ns = self.get_clock().now().nanoseconds
+        last_publish_ns = status_data.get("last_publish_ns")
+        publish_age_s = (
+            (now_ns - int(last_publish_ns)) / 1e9
+            if last_publish_ns is not None
+            else float("inf")
+        )
+        if status_data.get("status") == "error":
+            status.level = DiagnosticStatus.ERROR
+        elif publish_age_s > 2.0:
+            status.level = DiagnosticStatus.WARN
+            status.message = f"stale pointcloud ({publish_age_s:.2f}s since publish)"
+        else:
+            status.level = DiagnosticStatus.OK
+
+        status.values = [
+            self._kv("status", str(status_data.get("status", "unknown"))),
+            self._kv("point_count", str(status_data.get("point_count", 0))),
+            self._kv("sequence", str(status_data.get("sequence"))),
+            self._kv("timestamp_ns", str(status_data.get("timestamp_ns"))),
+            self._kv("attempt_count", str(status_data.get("attempt_count", 0))),
+            self._kv("publish_count", str(status_data.get("publish_count", 0))),
+            self._kv(
+                "same_sequence_count",
+                str(status_data.get("same_sequence_count", 0)),
+            ),
+            self._kv(
+                "read_duration_ms",
+                f"{float(status_data.get('read_duration_ms', 0.0)):.3f}",
+            ),
+            self._kv("last_publish_age_s", f"{publish_age_s:.3f}"),
+            self._kv("message", str(status_data.get("message", ""))),
+        ]
+        return status
 
     def _pointcloud2_from_lidar(self, sensor_name: str, data: dict[str, Any]) -> PointCloud2 | None:
         x = np.asarray(data.get("x", []), dtype=np.float32).reshape(-1)

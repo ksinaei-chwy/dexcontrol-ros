@@ -2,4 +2,6 @@ __pycache__
 ros_ws/build
 ros_ws/log
 ros_ws/install
+ros_ws/frames_*.gv
+ros_ws/frames_*.pdf
 .venv

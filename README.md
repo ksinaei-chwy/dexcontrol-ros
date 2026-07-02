@@ -59,6 +59,13 @@ Explore our comprehensive examples in the `examples/` directory:
 - 📺 **Teleoperation** - Remote control interfaces
 - 🔧 **Troubleshooting** - Diagnostic and maintenance tools
 
+## ROS 2 Workspace
+
+The unified ROS 2 Humble workspace for the Dexmate Vega 1P bridge, description,
+MoveIt config, SLAM, and Nav2 lives in [`ros_ws/`](ros_ws/README.md). Use that
+README when deploying from the `dexcontrol-ros` repository on Jetson Thor inside
+Docker.
+
 ---
 
 <div align="center">

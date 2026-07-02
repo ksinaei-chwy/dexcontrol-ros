@@ -1,0 +1,29 @@
+front_cloud_to_scan:
+  ros__parameters:
+    target_frame: base
+    transform_tolerance: 0.1
+    min_height: 0.1
+    max_height: 1.5
+    angle_min: -1.57  # -90 deg
+    angle_max:  1.57  # +90 deg
+    angle_increment: 0.02
+    scan_time: 0.1
+    range_min: 0.25
+    range_max: 12.0
+    use_inf: true
+    inf_epsilon: 1.0
+
+back_cloud_to_scan:
+  ros__parameters:
+    target_frame: base
+    transform_tolerance: 0.1
+    min_height: 0.1
+    max_height: 2.0
+    angle_min: -3.14
+    angle_max:  3.14
+    angle_increment: 0.008726646259971648
+    scan_time: 0.1
+    range_min: 0.25
+    range_max: 12.0
+    use_inf: true
+    inf_epsilon: 1.0

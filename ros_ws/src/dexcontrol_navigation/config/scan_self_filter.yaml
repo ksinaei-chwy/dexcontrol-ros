@@ -1,0 +1,14 @@
+front_scan_self_filter:
+  ros__parameters:
+    input_scan_topic: /lidar_3d_front/scan_raw
+    output_scan_topic: /lidar_3d_front/scan
+    target_frame: base
+    use_inf: true
+    log_period_s: 2.0
+
+    # Axis-aligned exclusion boxes in the base frame, meters.
+    # Format: "name:x_min,x_max,y_min,y_max".
+    # Start deliberately broad around the front body/arms. Tune with RViz by
+    # showing /lidar_3d_front/scan_raw and /lidar_3d_front/scan together.
+    exclusion_boxes:
+      - "front_body_and_arms:-0.20,1.00,-0.55,0.55"
