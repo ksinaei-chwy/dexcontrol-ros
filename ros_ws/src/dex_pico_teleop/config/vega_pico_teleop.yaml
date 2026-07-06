@@ -1,0 +1,45 @@
+pico_teleop_node:
+  ros__parameters:
+    control_rate_hz: 50.0
+    qos_depth: 10
+    publish_commands: true
+
+    # The node runs inside the onboard Jetson Thor Docker container. Bind to all
+    # container interfaces and forward/host-network the UDP/TCP port as needed.
+    network_enabled: true
+    network_transport: tcp
+    network_host: "0.0.0.0"
+    network_port: 63901
+    input_timeout_s: 0.35
+
+    # auto tries Pinocchio/Pink first and falls back to the local numeric IK
+    # backend if optional dependencies are missing. Set "pink" to fail fast.
+    kinematics_backend: auto
+    robot_urdf_path: ""
+    pink_qp_solver: quadprog
+
+    height_gain: 0.65
+    torso_min_z: 0.72
+    torso_max_z: 1.48
+    arm_position_scale: 1.0
+    grip_enable_threshold: 0.8
+
+    joystick_deadzone: 0.12
+    base_deadman_side: left
+    base_deadman_button: stick
+    base_vx_scale: 0.35
+    base_vy_scale: 0.25
+    base_wz_scale: 0.55
+
+    max_joint_delta_per_tick: 0.035
+    max_base_delta_per_tick: 0.08
+
+    # Leave empty to discover F5D6-style hand joints from /joint_states.
+    # Set these explicitly if dexcontrol exposes six aggregate hand DoF instead.
+    left_hand_joint_names: []
+    right_hand_joint_names: []
+
+    # Hand motion is disabled until close offsets match the discovered/configured
+    # joint count. Offsets are relative to the calibrated open hand position.
+    left_hand_close_offsets: []
+    right_hand_close_offsets: []
