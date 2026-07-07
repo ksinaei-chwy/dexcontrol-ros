@@ -94,16 +94,24 @@ class PicoTeleopNode(Node):
         )
 
     def _declare_parameters(self) -> None:
-        self.declare_parameter("control_rate_hz", 50.0)
+        self.declare_parameter("control_rate_hz", 20.0)
         self.declare_parameter("qos_depth", 10)
         self.declare_parameter("publish_commands", True)
         self.declare_parameter("network_enabled", True)
         self.declare_parameter("network_transport", "tcp")
         self.declare_parameter("network_host", "0.0.0.0")
         self.declare_parameter("network_port", 63901)
-        self.declare_parameter("kinematics_backend", "auto")
+        self.declare_parameter("kinematics_backend", "pink")
         self.declare_parameter("robot_urdf_path", "")
         self.declare_parameter("pink_qp_solver", "quadprog")
+        self.declare_parameter("pink_self_collision_enabled", True)
+        self.declare_parameter("pink_self_collision_components", ["left_arm", "right_arm"])
+        self.declare_parameter("pink_self_collision_srdf_path", "")
+        self.declare_parameter("pink_self_collision_urdf_path", "")
+        self.declare_parameter("pink_self_collision_max_pairs", 24)
+        self.declare_parameter("pink_self_collision_min_distance", 0.04)
+        self.declare_parameter("pink_self_collision_gain", 1.0)
+        self.declare_parameter("pink_self_collision_safe_displacement_gain", 0.0)
         self.declare_parameter("input_timeout_s", 0.35)
         self.declare_parameter("height_gain", 0.65)
         self.declare_parameter("torso_min_z", 0.72)
@@ -135,10 +143,54 @@ class PicoTeleopNode(Node):
             urdf_path = self._robot_urdf_path()
             solver = str(self.get_parameter("pink_qp_solver").value)
             dt = 1.0 / float(self.get_parameter("control_rate_hz").value)
-            kin = PinkVegaKinematics(urdf_path, solver=solver, dt=dt)
+            self_collision_components = self._pink_self_collision_components()
+            kin = PinkVegaKinematics(
+                urdf_path,
+                solver=solver,
+                dt=dt,
+                self_collision_components=self_collision_components,
+                self_collision_srdf_path=(
+                    self._self_collision_srdf_path() if self_collision_components else None
+                ),
+                self_collision_urdf_path=(
+                    self._self_collision_urdf_path() if self_collision_components else None
+                ),
+                collision_package_dirs=(
+                    self._collision_package_dirs() if self_collision_components else ()
+                ),
+                self_collision_n_pairs=int(
+                    self.get_parameter("pink_self_collision_max_pairs").value
+                ),
+                self_collision_gain=float(
+                    self.get_parameter("pink_self_collision_gain").value
+                ),
+                self_collision_safe_displacement_gain=float(
+                    self.get_parameter("pink_self_collision_safe_displacement_gain").value
+                ),
+                self_collision_d_min=float(
+                    self.get_parameter("pink_self_collision_min_distance").value
+                ),
+            )
             self.get_logger().info(
                 f"Using Pinocchio/Pink IK backend with solver '{solver}' and URDF {urdf_path}"
             )
+            if self_collision_components:
+                collision_summary = ", ".join(
+                    f"{component}="
+                    f"{getattr(kin, component).collision_pair_count}/"
+                    f"{getattr(kin, component).barrier_pair_count}"
+                    for component in self_collision_components
+                )
+                self.get_logger().info(
+                    "Pink self-collision barrier enabled for "
+                    f"{', '.join(self_collision_components)} using SRDF "
+                    f"{self._self_collision_srdf_path()} and collision URDF "
+                    f"{self._self_collision_urdf_path()}"
+                )
+                self.get_logger().info(
+                    "Pink self-collision reduced/barrier pair counts: "
+                    f"{collision_summary}"
+                )
             return kin
         except Exception as exc:  # noqa: BLE001 - optional backend fallback
             if backend == "pink":
@@ -152,6 +204,38 @@ class PicoTeleopNode(Node):
             return Path(configured)
         description_share = Path(get_package_share_directory("dexmate_vega_description"))
         return description_share / "urdf" / "vega_1p_f5d6.package.urdf"
+
+    def _self_collision_srdf_path(self) -> Path:
+        configured = str(self.get_parameter("pink_self_collision_srdf_path").value)
+        if configured:
+            return Path(configured)
+        moveit_share = Path(get_package_share_directory("dexmate_vega_moveit_config"))
+        return moveit_share / "config" / "vega_1p_f5d6.srdf"
+
+    def _self_collision_urdf_path(self) -> Path:
+        configured = str(self.get_parameter("pink_self_collision_urdf_path").value)
+        if configured:
+            return Path(configured)
+        description_share = Path(get_package_share_directory("dexmate_vega_description"))
+        return (
+            description_share
+            / "robots"
+            / "humanoid"
+            / "vega_1p"
+            / "vega_1p_f5d6_collision_spheres.collision.urdf"
+        )
+
+    def _collision_package_dirs(self) -> tuple[Path, ...]:
+        description_share = Path(get_package_share_directory("dexmate_vega_description"))
+        return (description_share.parent,)
+
+    def _pink_self_collision_components(self) -> tuple[str, ...]:
+        if not bool(self.get_parameter("pink_self_collision_enabled").value):
+            return ()
+        return tuple(
+            component.lower()
+            for component in self._string_list_parameter("pink_self_collision_components")
+        )
 
     def _on_joint_state(self, msg: JointState) -> None:
         for name, position in zip(msg.name, msg.position):

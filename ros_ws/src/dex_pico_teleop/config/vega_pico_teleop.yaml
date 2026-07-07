@@ -1,6 +1,6 @@
 pico_teleop_node:
   ros__parameters:
-    control_rate_hz: 50.0
+    control_rate_hz: 20.0
     qos_depth: 10
     publish_commands: true
 
@@ -12,11 +12,19 @@ pico_teleop_node:
     network_port: 63901
     input_timeout_s: 0.35
 
-    # auto tries Pinocchio/Pink first and falls back to the local numeric IK
-    # backend if optional dependencies are missing. Set "pink" to fail fast.
-    kinematics_backend: auto
+    # Use Pink so joint and velocity limits are active. Set "numeric" only for
+    # local dry-run/debug sessions.
+    kinematics_backend: pink
     robot_urdf_path: ""
     pink_qp_solver: quadprog
+    pink_self_collision_enabled: true
+    pink_self_collision_components: [left_arm, right_arm]
+    pink_self_collision_srdf_path: ""
+    pink_self_collision_urdf_path: ""
+    pink_self_collision_max_pairs: 24
+    pink_self_collision_min_distance: 0.04
+    pink_self_collision_gain: 1.0
+    pink_self_collision_safe_displacement_gain: 0.0
 
     height_gain: 0.65
     torso_min_z: 0.72

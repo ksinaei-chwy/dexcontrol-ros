@@ -126,3 +126,41 @@ class TestCore(unittest.TestCase):
         pos, _rot = kin.arm_center_pose(solution.q)
         self.assertTrue(solution.success)
         self.assertLess(abs(pos[2] - 1.05), 0.02)
+
+    def test_pink_backend_builds_arm_self_collision_barriers_when_available(self):
+        repo_root = Path(__file__).resolve().parents[4]
+        urdf_path = repo_root / "ros_ws/src/dexmate_vega_description/urdf/vega_1p_f5d6.package.urdf"
+        srdf_path = repo_root / "ros_ws/src/dexmate_vega_moveit_config/config/vega_1p_f5d6.srdf"
+        collision_urdf_path = (
+            repo_root
+            / "ros_ws/src/dexmate_vega_description/robots/humanoid/vega_1p"
+            / "vega_1p_f5d6_collision_spheres.collision.urdf"
+        )
+        try:
+            kin = PinkVegaKinematics(
+                urdf_path,
+                self_collision_components=("left_arm", "right_arm"),
+                self_collision_srdf_path=srdf_path,
+                self_collision_urdf_path=collision_urdf_path,
+                collision_package_dirs=(repo_root / "ros_ws/src",),
+                self_collision_n_pairs=8,
+            )
+        except (PinkUnavailableError, ImportError, RuntimeError) as exc:
+            self.skipTest(f"Pink backend unavailable: {exc}")
+
+        self.assertGreater(kin.left_arm.collision_pair_count, 1000)
+        self.assertGreater(kin.right_arm.collision_pair_count, 1000)
+        self.assertEqual(kin.left_arm.barrier_pair_count, 8)
+        self.assertEqual(kin.right_arm.barrier_pair_count, 8)
+        self.assertEqual(kin.torso.barrier_pair_count, 0)
+
+        seed = np.zeros(7)
+        start_pos, start_rot = kin.left_arm.forward(seed)
+        solution = kin.solve_arm_pose(
+            "left",
+            seed,
+            start_pos + np.array([0.01, 0.0, -0.01]),
+            start_rot,
+        )
+        self.assertTrue(solution.success)
+        self.assertLess(solution.error_norm, 0.05)
