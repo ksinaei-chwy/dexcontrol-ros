@@ -31,6 +31,7 @@ setup(
         "console_scripts": [
             "pico_teleop_node = dex_pico_teleop.teleop_node:main",
             "pico_meshcat_visualizer = dex_pico_teleop.meshcat_visualizer_node:main",
+            "dexmate_head_camera_vision = dex_pico_teleop.head_camera_vision_node:main",
         ],
     },
 )

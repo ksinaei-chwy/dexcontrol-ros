@@ -34,6 +34,21 @@ def generate_launch_description() -> LaunchDescription:
                 default_value="/dex_pico_teleop/log_frame",
                 description="Teleop log frame topic to visualize.",
             ),
+            DeclareLaunchArgument(
+                "meshcat_use_joint_state_initial_pose",
+                default_value="true",
+                description="Use /joint_states only before the first teleop log frame.",
+            ),
+            DeclareLaunchArgument(
+                "meshcat_show_visuals",
+                default_value="true",
+                description="Display real Vega visual meshes in MeshCat.",
+            ),
+            DeclareLaunchArgument(
+                "meshcat_show_collisions",
+                default_value="false",
+                description="Display collision geometry in MeshCat.",
+            ),
             Node(
                 package="dex_pico_teleop",
                 executable="pico_meshcat_visualizer",
@@ -51,6 +66,18 @@ def generate_launch_description() -> LaunchDescription:
                             value_type=float,
                         ),
                         "topic": LaunchConfiguration("topic"),
+                        "meshcat_use_joint_state_initial_pose": ParameterValue(
+                            LaunchConfiguration("meshcat_use_joint_state_initial_pose"),
+                            value_type=bool,
+                        ),
+                        "meshcat_show_visuals": ParameterValue(
+                            LaunchConfiguration("meshcat_show_visuals"),
+                            value_type=bool,
+                        ),
+                        "meshcat_show_collisions": ParameterValue(
+                            LaunchConfiguration("meshcat_show_collisions"),
+                            value_type=bool,
+                        ),
                     }
                 ],
             ),

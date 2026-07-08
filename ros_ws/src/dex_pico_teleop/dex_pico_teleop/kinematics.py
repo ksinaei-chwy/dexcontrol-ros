@@ -24,6 +24,8 @@ TORSO_JOINTS = ("torso_j1", "torso_j2", "torso_j3")
 HEAD_JOINTS = ("head_j1", "head_j2", "head_j3")
 LEFT_ARM_JOINTS = tuple(f"L_arm_j{i}" for i in range(1, 8))
 RIGHT_ARM_JOINTS = tuple(f"R_arm_j{i}" for i in range(1, 8))
+ROBOT_SHOULDER_LATERAL_OFFSET_M = 0.16946
+ROBOT_ARM_REACH_M = 0.80
 
 
 @dataclass(frozen=True)
@@ -110,6 +112,10 @@ class VegaKinematics:
     def arm_center_pose(self, torso_q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         return self.torso.forward(torso_q)
 
+    def arm_shoulder_position(self, side: str) -> np.ndarray:
+        y = ROBOT_SHOULDER_LATERAL_OFFSET_M if side == "left" else -ROBOT_SHOULDER_LATERAL_OFFSET_M
+        return np.array([0.0, y, 0.0], dtype=np.float64)
+
     def solve_torso_height(
         self,
         q_seed: np.ndarray,
@@ -121,27 +127,12 @@ class VegaKinematics:
         q = self.torso.clamp(q_seed)
         if target_x is None:
             target_x = float(self.torso.forward(q)[0][0])
-
-        def error(values: np.ndarray) -> np.ndarray:
-            pos, rot = self.torso.forward(values)
-            pitch = np.arctan2(rot[0, 2], rot[0, 0])
-            return np.array(
-                [
-                    float(target_z) - pos[2],
-                    normalize_angle(float(target_pitch) - float(pitch)),
-                    0.25 * (float(target_x) - pos[0]),
-                ],
-                dtype=np.float64,
-            )
-
-        return _solve_error(
+        return _solve_torso_height_closed_form(
+            self.torso,
             q,
-            self.torso.clamp,
-            error,
-            damping=5.0e-3,
-            max_step=0.04,
-            max_iterations=max_iterations,
-            tolerance=2.0e-3,
+            float(target_x),
+            float(target_z),
+            float(target_pitch),
         )
 
     def solve_head_orientation(
@@ -217,6 +208,85 @@ def _solve_error(
     return IKSolution(q=q, success=last_norm <= tolerance * 2.0, error_norm=last_norm, iterations=max_iterations)
 
 
+def _solve_torso_height_closed_form(
+    chain: KinematicChain,
+    q_seed: np.ndarray,
+    target_x: float,
+    target_z: float,
+    target_pitch: float,
+    tolerance: float = 2.0e-3,
+) -> IKSolution:
+    specs = chain.specs
+    base = _xz(specs[0].origin)
+    link_1 = _xz(specs[1].origin)
+    link_2 = _xz(specs[2].origin)
+    terminal = _xz(specs[3].origin)
+    target = np.array([target_x, target_z], dtype=np.float64)
+    theta = normalize_angle(target_pitch)
+
+    wrist = target - base - _rot2(theta) @ terminal
+    l1 = float(np.linalg.norm(link_1))
+    l2 = float(np.linalg.norm(link_2))
+    distance = float(np.linalg.norm(wrist))
+    if l1 < 1.0e-9 or l2 < 1.0e-9 or distance < 1.0e-9:
+        return IKSolution(q=chain.clamp(q_seed), success=False, error_norm=float("inf"), iterations=0)
+
+    alpha_1 = float(np.arctan2(link_1[1], link_1[0]))
+    alpha_2 = float(np.arctan2(link_2[1], link_2[0]))
+    cos_delta_raw = (distance * distance - l1 * l1 - l2 * l2) / (2.0 * l1 * l2)
+    cos_delta = float(np.clip(cos_delta_raw, -1.0, 1.0))
+    seed = chain.clamp(q_seed)
+    candidates: list[tuple[float, np.ndarray]] = []
+    for elbow_sign in (1.0, -1.0):
+        delta = float(elbow_sign * np.arccos(cos_delta))
+        shoulder_angle = float(
+            np.arctan2(wrist[1], wrist[0])
+            - np.arctan2(l2 * np.sin(delta), l1 + l2 * np.cos(delta))
+        )
+        q1 = shoulder_angle - alpha_1
+        q2 = alpha_2 - alpha_1 - delta
+        q3 = -q1 + q2 - theta
+        q = chain.clamp(np.array([q1, q2, q3], dtype=np.float64))
+        error = _torso_closed_form_error(chain, q, target_x, target_z, target_pitch)
+        seed_distance = float(np.linalg.norm(q - seed))
+        candidates.append((error + 1.0e-4 * seed_distance, q))
+
+    _score, best_q = min(candidates, key=lambda item: item[0])
+    error_norm = _torso_closed_form_error(chain, best_q, target_x, target_z, target_pitch)
+    success = error_norm <= tolerance and abs(cos_delta_raw) <= 1.0 + 1.0e-9
+    return IKSolution(q=best_q, success=success, error_norm=error_norm, iterations=0)
+
+
+def _torso_closed_form_error(
+    chain: KinematicChain,
+    q: np.ndarray,
+    target_x: float,
+    target_z: float,
+    target_pitch: float,
+) -> float:
+    pos, rot = chain.forward(q)
+    pitch = np.arctan2(rot[0, 2], rot[0, 0])
+    error = np.array(
+        [
+            float(target_z) - pos[2],
+            normalize_angle(float(target_pitch) - float(pitch)),
+            0.25 * (float(target_x) - pos[0]),
+        ],
+        dtype=np.float64,
+    )
+    return float(np.linalg.norm(error))
+
+
+def _xz(vector: np.ndarray) -> np.ndarray:
+    return np.asarray([vector[0], vector[2]], dtype=np.float64)
+
+
+def _rot2(angle: float) -> np.ndarray:
+    c = np.cos(angle)
+    s = np.sin(angle)
+    return np.array([[c, s], [-s, c]], dtype=np.float64)
+
+
 def _finite_difference_jacobian(q: np.ndarray, error_fn, eps: float = 1.0e-5) -> np.ndarray:
     base = error_fn(q)
     jac = np.zeros((base.size, q.size), dtype=np.float64)
@@ -290,4 +360,3 @@ def _right_arm_specs() -> list[JointSpec]:
         _fixed("R_arm_j8", [0.11597, 0.0, -0.032], (0.0, 1.57079, 0.0)),
         _fixed("R_ee_j0", [0.0, 0.0, 0.0], (0.0, 0.0, 1.57079)),
     ]
-

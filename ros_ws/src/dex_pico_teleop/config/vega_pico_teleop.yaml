@@ -1,6 +1,6 @@
 pico_teleop_node:
   ros__parameters:
-    control_rate_hz: 20.0
+    control_rate_hz: 50.0
     qos_depth: 10
     publish_commands: true
 
@@ -12,12 +12,12 @@ pico_teleop_node:
     network_port: 63901
     input_timeout_s: 0.35
 
-    # Use Pink so joint and velocity limits are active. Set "numeric" only for
-    # local dry-run/debug sessions.
+    # Use Pink so position limits and self-collision barriers are active. Set
+    # "numeric" only for local dry-run/debug sessions.
     kinematics_backend: pink
     robot_urdf_path: ""
     pink_qp_solver: quadprog
-    pink_self_collision_enabled: true
+    pink_self_collision_enabled: false
     pink_self_collision_components: [left_arm, right_arm]
     pink_self_collision_srdf_path: ""
     pink_self_collision_urdf_path: ""
@@ -25,22 +25,43 @@ pico_teleop_node:
     pink_self_collision_min_distance: 0.04
     pink_self_collision_gain: 1.0
     pink_self_collision_safe_displacement_gain: 0.0
+    pink_velocity_limit_enabled: false
+    pink_task_gain: 1.0
+    pink_lm_damping: 1.0e-6
+    pink_solve_damping: 1.0e-8
+    pink_torso_max_iterations: 25
+    pink_head_max_iterations: 8
+    pink_arm_max_iterations: 6
+    pink_arm_position_cost: 1.0
+    pink_arm_orientation_cost: 0.1
 
-    height_gain: 0.65
+    height_gain: 1.0
     torso_min_z: 0.72
     torso_max_z: 1.48
-    arm_position_scale: 1.0
-    grip_enable_threshold: 0.8
+    head_tracking_enabled: false
+    head_disabled_pitch_deg: 20.0
+
+    # Posture retargeting maps controller pose from estimated human shoulders
+    # to the robot arm bases so operator height does not limit robot reach.
+    operator_shoulder_width_m: 0.42
+    operator_head_to_shoulder_z_m: 0.22
+    operator_shoulder_x_m: 0.0
+    operator_arm_length_ratio: 0.44
+    operator_arm_length_min_m: 0.45
+    operator_arm_length_max_m: 0.85
+    robot_shoulder_lateral_offset_m: 0.16946
+    robot_arm_reach_m: 0.80
 
     joystick_deadzone: 0.12
-    base_deadman_side: left
-    base_deadman_button: stick
     base_vx_scale: 0.35
     base_vy_scale: 0.25
     base_wz_scale: 0.55
 
-    max_joint_delta_per_tick: 0.035
-    max_base_delta_per_tick: 0.08
+    max_joint_delta_per_tick: 0.08
+    max_torso_joint_delta_per_tick: 0.028
+    max_head_joint_delta_per_tick: 0.02
+    max_arm_joint_delta_per_tick: 0.08
+    max_base_delta_per_tick: 0.032
 
     # Leave empty to discover F5D6-style hand joints from /joint_states.
     # Set these explicitly if dexcontrol exposes six aggregate hand DoF instead.

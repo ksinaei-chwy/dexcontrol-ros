@@ -8,13 +8,13 @@ from pathlib import Path
 import numpy as np
 
 from dex_pico_teleop.kinematics import (
-    HEAD_JOINTS,
     IKSolution,
     LEFT_ARM_JOINTS,
     RIGHT_ARM_JOINTS,
-    TORSO_JOINTS,
+    ROBOT_SHOULDER_LATERAL_OFFSET_M,
+    VegaKinematics,
 )
-from dex_pico_teleop.transforms import normalize_angle, rotation_error
+from dex_pico_teleop.transforms import rotation_error
 
 
 class PinkUnavailableError(RuntimeError):
@@ -45,6 +45,11 @@ class PinkChain:
         solver: str = "quadprog",
         dt: float = 0.02,
         self_collision: SelfCollisionOptions | None = None,
+        root_frame_name: str | None = None,
+        velocity_limit_enabled: bool = False,
+        task_gain: float = 1.0,
+        lm_damping: float = 1.0e-6,
+        solve_damping: float = 1.0e-8,
     ) -> None:
         try:
             import pinocchio as pin
@@ -75,6 +80,10 @@ class PinkChain:
         self.dt = float(dt)
         self.joint_names = active_joint_names
         self.frame_name = frame_name
+        self.root_frame_name = root_frame_name
+        self.task_gain = float(task_gain)
+        self.lm_damping = float(lm_damping)
+        self.solve_damping = float(solve_damping)
 
         if self_collision is None:
             full_model = pin.buildModelFromUrdf(str(urdf_path))
@@ -118,12 +127,20 @@ class PinkChain:
 
         self.data = self.model.createData()
         self.neutral = pin.neutral(self.model)
-        self.limits = [ConfigurationLimit(self.model), VelocityLimit(self.model)]
+        self.limits = [ConfigurationLimit(self.model)]
+        if velocity_limit_enabled:
+            self.limits.append(VelocityLimit(self.model))
         self.barriers = self._make_barriers(self_collision)
+        self.frame_id = self.model.getFrameId(self.frame_name)
+        self.root_frame_id = (
+            None if self.root_frame_name is None else self.model.getFrameId(self.root_frame_name)
+        )
         self._indices = {
             name: int(self.model.joints[self.model.getJointId(name)].idx_q)
             for name in active_joint_names
         }
+        self._lower_position_limits = np.asarray(self.model.lowerPositionLimit, dtype=np.float64)
+        self._upper_position_limits = np.asarray(self.model.upperPositionLimit, dtype=np.float64)
         self.collision_pair_count = (
             0 if self.collision_model is None else len(self.collision_model.collisionPairs)
         )
@@ -131,18 +148,23 @@ class PinkChain:
 
     def q_from_values(self, values: np.ndarray) -> np.ndarray:
         q = self.neutral.copy()
+        joint_values = np.asarray(values, dtype=np.float64).reshape(len(self.joint_names))
         for index, name in enumerate(self.joint_names):
-            q[self._indices[name]] = float(values[index])
-        return q
+            q[self._indices[name]] = float(joint_values[index])
+        return self._clip_full_q(q)
 
     def values_from_q(self, q: np.ndarray) -> np.ndarray:
-        return np.asarray([q[self._indices[name]] for name in self.joint_names], dtype=np.float64)
+        clipped_q = self._clip_full_q(q)
+        return np.asarray(
+            [clipped_q[self._indices[name]] for name in self.joint_names],
+            dtype=np.float64,
+        )
 
     def forward(self, values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         q = self.q_from_values(values)
         self.pin.forwardKinematics(self.model, self.data, q)
         self.pin.updateFramePlacements(self.model, self.data)
-        transform = self.data.oMf[self.model.getFrameId(self.frame_name)]
+        transform = self._frame_transform(self.data)
         return np.asarray(transform.translation).copy(), np.asarray(transform.rotation).copy()
 
     def solve_pose(
@@ -173,10 +195,11 @@ class PinkChain:
             self.frame_name,
             position_cost=position_cost,
             orientation_cost=orientation_cost,
-            lm_damping=1.0e-6,
-            gain=1.0,
+            lm_damping=self.lm_damping,
+            gain=self.task_gain,
         )
-        target = self.pin.SE3(
+        target = self._target_transform(
+            q_seed_full,
             np.asarray(target_rotation, dtype=np.float64).reshape(3, 3),
             np.asarray(target_position, dtype=np.float64).reshape(3),
         )
@@ -214,7 +237,7 @@ class PinkChain:
                     solver=self.solver,
                     limits=self.limits,
                     barriers=self.barriers,
-                    damping=1.0e-8,
+                    damping=self.solve_damping,
                 )
             except self.NoSolutionFound:
                 return IKSolution(
@@ -224,6 +247,7 @@ class PinkChain:
                     iterations=iteration,
                 )
             configuration.integrate_inplace(velocity, self.dt)
+            configuration.update(self._clip_full_q(configuration.q))
 
         return IKSolution(
             q=self.values_from_q(configuration.q),
@@ -232,11 +256,40 @@ class PinkChain:
             iterations=max_iterations,
         )
 
+    def _clip_full_q(self, q: np.ndarray) -> np.ndarray:
+        clipped = np.asarray(q, dtype=np.float64).copy()
+        limited = self._upper_position_limits > self._lower_position_limits
+        clipped[limited] = np.clip(
+            clipped[limited],
+            self._lower_position_limits[limited],
+            self._upper_position_limits[limited],
+        )
+        return clipped
+
     def _forward_q(self, q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         self.pin.forwardKinematics(self.model, self.data, q)
         self.pin.updateFramePlacements(self.model, self.data)
-        transform = self.data.oMf[self.model.getFrameId(self.frame_name)]
+        transform = self._frame_transform(self.data)
         return np.asarray(transform.translation).copy(), np.asarray(transform.rotation).copy()
+
+    def _frame_transform(self, data) -> object:
+        transform = data.oMf[self.frame_id]
+        if self.root_frame_id is None:
+            return transform
+        return data.oMf[self.root_frame_id].inverse() * transform
+
+    def _target_transform(
+        self,
+        q_seed: np.ndarray,
+        target_rotation: np.ndarray,
+        target_position: np.ndarray,
+    ) -> object:
+        target = self.pin.SE3(target_rotation, target_position)
+        if self.root_frame_id is None:
+            return target
+        self.pin.forwardKinematics(self.model, self.data, q_seed)
+        self.pin.updateFramePlacements(self.model, self.data)
+        return self.data.oMf[self.root_frame_id] * target
 
     def _make_barriers(self, self_collision: SelfCollisionOptions | None) -> list[object]:
         if self_collision is None or self.collision_model is None:
@@ -295,8 +348,24 @@ class PinkVegaKinematics:
         self_collision_gain: float = 1.0,
         self_collision_safe_displacement_gain: float = 0.0,
         self_collision_d_min: float = 0.04,
+        velocity_limit_enabled: bool = False,
+        task_gain: float = 1.0,
+        lm_damping: float = 1.0e-6,
+        solve_damping: float = 1.0e-8,
+        torso_max_iterations: int = 25,
+        head_max_iterations: int = 8,
+        arm_max_iterations: int = 20,
+        arm_position_cost: float = 1.0,
+        arm_orientation_cost: float = 0.1,
     ) -> None:
         path = str(urdf_path)
+        self.torso_max_iterations = int(torso_max_iterations)
+        self.head_max_iterations = int(head_max_iterations)
+        self.arm_max_iterations = int(arm_max_iterations)
+        self.arm_position_cost = float(arm_position_cost)
+        self.arm_orientation_cost = float(arm_orientation_cost)
+        self.velocity_limit_enabled = bool(velocity_limit_enabled)
+        self._simple_kinematics = VegaKinematics()
         collision_components = {component.lower() for component in self_collision_components}
         valid_components = {"torso", "head", "left_arm", "right_arm"}
         unknown_components = collision_components - valid_components
@@ -306,48 +375,19 @@ class PinkVegaKinematics:
                 f"{', '.join(sorted(unknown_components))}; valid components are "
                 f"{', '.join(sorted(valid_components))}"
             )
-        self.torso = PinkChain(
-            path,
-            TORSO_JOINTS,
-            "arm_center",
-            solver=solver,
-            dt=dt,
-            self_collision=_self_collision_options(
-                "torso",
-                collision_components,
-                self_collision_srdf_path,
-                self_collision_urdf_path,
-                collision_package_dirs,
-                self_collision_n_pairs,
-                self_collision_gain,
-                self_collision_safe_displacement_gain,
-                self_collision_d_min,
-            ),
-        )
-        self.head = PinkChain(
-            path,
-            HEAD_JOINTS,
-            "head_l3",
-            solver=solver,
-            dt=dt,
-            self_collision=_self_collision_options(
-                "head",
-                collision_components,
-                self_collision_srdf_path,
-                self_collision_urdf_path,
-                collision_package_dirs,
-                self_collision_n_pairs,
-                self_collision_gain,
-                self_collision_safe_displacement_gain,
-                self_collision_d_min,
-            ),
-        )
+        self.torso = self._simple_kinematics.torso
+        self.head = self._simple_kinematics.head
         self.left_arm = PinkChain(
             path,
             LEFT_ARM_JOINTS,
             "L_ee",
             solver=solver,
             dt=dt,
+            root_frame_name="arm_center",
+            velocity_limit_enabled=self.velocity_limit_enabled,
+            task_gain=task_gain,
+            lm_damping=lm_damping,
+            solve_damping=solve_damping,
             self_collision=_self_collision_options(
                 "left_arm",
                 collision_components,
@@ -366,6 +406,11 @@ class PinkVegaKinematics:
             "R_ee",
             solver=solver,
             dt=dt,
+            root_frame_name="arm_center",
+            velocity_limit_enabled=self.velocity_limit_enabled,
+            task_gain=task_gain,
+            lm_damping=lm_damping,
+            solve_damping=solve_damping,
             self_collision=_self_collision_options(
                 "right_arm",
                 collision_components,
@@ -380,7 +425,11 @@ class PinkVegaKinematics:
         )
 
     def arm_center_pose(self, torso_q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        return self.torso.forward(torso_q)
+        return self._simple_kinematics.arm_center_pose(torso_q)
+
+    def arm_shoulder_position(self, side: str) -> np.ndarray:
+        y = ROBOT_SHOULDER_LATERAL_OFFSET_M if side == "left" else -ROBOT_SHOULDER_LATERAL_OFFSET_M
+        return np.array([0.0, y, 0.0], dtype=np.float64)
 
     def solve_torso_height(
         self,
@@ -388,38 +437,26 @@ class PinkVegaKinematics:
         target_z: float,
         target_pitch: float = 0.0,
         target_x: float | None = None,
-        max_iterations: int = 30,
+        max_iterations: int | None = None,
     ) -> IKSolution:
-        pos, rot = self.torso.forward(q_seed)
-        if target_x is None:
-            target_x = float(pos[0])
-        target_pos = np.array([target_x, pos[1], target_z], dtype=np.float64)
-        target_rot = _pitch_only_rotation(target_pitch)
-        return self.torso.solve_pose(
+        return self._simple_kinematics.solve_torso_height(
             q_seed,
-            target_pos,
-            target_rot,
-            position_cost=[0.25, 0.0, 1.0],
-            orientation_cost=[0.0, 1.0, 0.0],
-            max_iterations=max_iterations,
-            tolerance=4.0e-3,
+            target_z,
+            target_pitch=target_pitch,
+            target_x=target_x,
+            max_iterations=self.torso_max_iterations if max_iterations is None else max_iterations,
         )
 
     def solve_head_orientation(
         self,
         q_seed: np.ndarray,
         target_rotation: np.ndarray,
-        max_iterations: int = 30,
+        max_iterations: int | None = None,
     ) -> IKSolution:
-        pos, _rot = self.head.forward(q_seed)
-        return self.head.solve_pose(
+        return self._simple_kinematics.solve_head_orientation(
             q_seed,
-            pos,
             target_rotation,
-            position_cost=0.0,
-            orientation_cost=1.0,
-            max_iterations=max_iterations,
-            tolerance=4.0e-3,
+            max_iterations=self.head_max_iterations if max_iterations is None else max_iterations,
         )
 
     def solve_arm_pose(
@@ -434,17 +471,11 @@ class PinkVegaKinematics:
             q_seed,
             target_position,
             target_rotation,
-            position_cost=1.0,
-            orientation_cost=0.55,
-            max_iterations=30,
+            position_cost=self.arm_position_cost,
+            orientation_cost=self.arm_orientation_cost,
+            max_iterations=self.arm_max_iterations,
             tolerance=6.0e-3,
         )
-
-
-def _pitch_only_rotation(pitch: float) -> np.ndarray:
-    c = np.cos(normalize_angle(float(pitch)))
-    s = np.sin(normalize_angle(float(pitch)))
-    return np.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]], dtype=np.float64)
 
 
 def _self_collision_options(

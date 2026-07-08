@@ -30,13 +30,18 @@ ros2 launch dex_pico_teleop pico_teleop.launch.py
 
 ## Pink Self-Collision Barrier
 
-When the Pink backend is active, arm IK uses Pink's `SelfCollisionBarrier` by
-default. The kinematic model still comes from `robot_urdf_path`, while the
-barrier uses the Vega collision-sphere URDF and removes disabled collision pairs
-from the MoveIt SRDF:
+When the Pink backend is active, arm IK always enforces position limits. Pink's
+`SelfCollisionBarrier` is available but defaults off because timing probes on
+the current setup showed it cannot meet the 50 Hz teleop loop: even one
+collision-barrier iteration for both arms took about 47 ms, and normal
+multi-iteration solves were much slower. Torso height is solved with closed-form
+planar geometry, and the head defaults to a fixed pitch command, so normal
+teleop does not use Pink for torso/head. The arm kinematic model still comes
+from `robot_urdf_path`, while the optional barrier uses the Vega
+collision-sphere URDF and removes disabled collision pairs from the MoveIt SRDF:
 
 ```yaml
-pink_self_collision_enabled: true
+pink_self_collision_enabled: false
 pink_self_collision_components: [left_arm, right_arm]
 pink_self_collision_srdf_path: ""
 pink_self_collision_urdf_path: ""
@@ -44,15 +49,32 @@ pink_self_collision_max_pairs: 24
 pink_self_collision_min_distance: 0.04
 pink_self_collision_gain: 1.0
 pink_self_collision_safe_displacement_gain: 0.0
+pink_velocity_limit_enabled: false
 ```
 
 Leaving the SRDF and collision URDF paths empty selects the installed
 `dexmate_vega_moveit_config/config/vega_1p_f5d6.srdf` and
 `dexmate_vega_description/robots/humanoid/vega_1p/vega_1p_f5d6_collision_spheres.collision.urdf`.
-The default component list intentionally protects the two arm solvers. Torso
-and head barriers can be enabled for tuning, but the current SRDF/sphere set has
-nominal close torso/head pairs that should be evaluated in MeshCat before
-hardware use.
+The default component list targets the two arm solvers when the barrier is
+explicitly enabled. Torso and head self-collision components are ignored because
+those groups are not solved through Pink during normal teleop.
+
+The default teleop loop runs at 50 Hz. For IK responsiveness, arm commands use
+a separate slew limit from torso/head commands:
+
+```yaml
+pink_arm_max_iterations: 6
+pink_arm_position_cost: 1.0
+pink_arm_orientation_cost: 0.1
+max_arm_joint_delta_per_tick: 0.08
+```
+
+Watch `/dex_pico_teleop/status` for `loop_ms`, `left_arm_iterations`,
+`right_arm_iterations`, and arm error values. If `loop_ms` is consistently over
+20 ms with `pink_self_collision_enabled:=false`, reduce `pink_arm_max_iterations`.
+If loop timing is good but motion still lags, increase
+`max_arm_joint_delta_per_tick` gradually. If `pink_self_collision_enabled:=true`,
+expect the loop to miss 50 Hz on the current setup.
 
 For dry-run testing without publishing robot commands:
 

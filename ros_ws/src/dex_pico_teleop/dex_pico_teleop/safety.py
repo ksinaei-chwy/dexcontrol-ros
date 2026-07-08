@@ -17,6 +17,27 @@ def joystick_with_deadzone(joystick: np.ndarray, deadzone: float) -> np.ndarray:
     return np.array([apply_deadzone(values[0], deadzone), apply_deadzone(values[1], deadzone)])
 
 
+def base_twist_from_joysticks(
+    left_joystick: np.ndarray,
+    right_joystick: np.ndarray,
+    deadzone: float,
+    vx_scale: float,
+    vy_scale: float,
+    wz_scale: float,
+) -> np.ndarray:
+    """Map Pico controller joysticks to body-frame base velocity."""
+    left = joystick_with_deadzone(left_joystick, deadzone)
+    right = joystick_with_deadzone(right_joystick, deadzone)
+    return np.array(
+        [
+            left[1] * float(vx_scale),
+            -left[0] * float(vy_scale),
+            -right[0] * float(wz_scale),
+        ],
+        dtype=np.float64,
+    )
+
+
 class VectorRateLimiter:
     """Limit per-element command changes per update."""
 
@@ -35,4 +56,3 @@ class VectorRateLimiter:
         delta = np.clip(target - self._last, -self.max_delta, self.max_delta)
         self._last = self._last + delta
         return self._last.copy()
-
