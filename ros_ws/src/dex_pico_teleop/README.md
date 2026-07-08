@@ -57,15 +57,14 @@ hardware use.
 For dry-run testing without publishing robot commands:
 
 ```bash
-ros2 launch dex_pico_teleop pico_teleop.launch.py publish_commands:=false
+ros2 launch dex_pico_teleop pico_teleop_dry_run.launch.py
 ```
 
 If the Pico sender app is configured for TCP instead of UDP, launch the node
 in TCP mode and point the headset at the robot/Jetson Wi-Fi IP and port:
 
 ```bash
-ros2 launch dex_pico_teleop pico_teleop.launch.py \
-  publish_commands:=false \
+ros2 launch dex_pico_teleop pico_teleop_dry_run.launch.py \
   network_transport:=tcp \
   network_host:=0.0.0.0 \
   network_port:=63901
@@ -117,7 +116,9 @@ Vega/ROS convention: x forward, y left, z up.
 
 Use this test before sending anything to the real robot. Teleop runs with
 `publish_commands:=false`, publishes only `/dex_pico_teleop/log_frame`, and the
-MeshCat node mirrors those computed joint targets in a browser.
+MeshCat node mirrors those computed joint targets in a browser. This launch does
+not start `dexcontrol_bridge`; if `/joint_states` is already present, MeshCat
+uses it only as the initial pose before the first teleop log frame.
 
 Install MeshCat in the same Python environment as ROS:
 
@@ -144,24 +145,13 @@ The local URL printed by MeshCat, such as `http://127.0.0.1:7000/static/`, only
 works inside the Jetson/container session. Use `http://<jetson-ip>:7000/static/`
 from another machine on the same network.
 
-Terminal 1: start the bridge or any source that publishes `/joint_states`, then
-verify joint states are visible:
+Terminal 1: start the Pico teleop dry-run stack in TCP mode:
 
 ```bash
 cd /workspaces/dexcontrol-ros/ros_ws
 source /opt/ros/humble/setup.bash
 source install/setup.bash
-ros2 topic echo --once /joint_states
-```
-
-Terminal 2: start the Pico teleop node in dry-run TCP mode:
-
-```bash
-cd /workspaces/dexcontrol-ros/ros_ws
-source /opt/ros/humble/setup.bash
-source install/setup.bash
-RMW_IMPLEMENTATION=rmw_cyclonedds_cpp ros2 launch dex_pico_teleop pico_teleop.launch.py \
-  publish_commands:=false \
+RMW_IMPLEMENTATION=rmw_cyclonedds_cpp ros2 launch dex_pico_teleop pico_teleop_dry_run.launch.py \
   network_transport:=tcp \
   network_host:=0.0.0.0 \
   network_port:=63901
@@ -176,15 +166,6 @@ In XRoboToolkit on the Pico headset:
    different addresses.
 5. Enable tracking send for the headset and controllers, then reconnect.
 
-Terminal 3: start the MeshCat visualizer:
-
-```bash
-cd /workspaces/dexcontrol-ros/ros_ws
-source /opt/ros/humble/setup.bash
-source install/setup.bash
-RMW_IMPLEMENTATION=rmw_cyclonedds_cpp ros2 launch dex_pico_teleop meshcat_visualizer.launch.py
-```
-
 Open the MeshCat URL in the desktop browser. If you are browsing from the
 desktop/laptop, use `http://<jetson-ip>:7000/static/`, not `127.0.0.1`.
 
@@ -192,15 +173,23 @@ After Pico data is connected, stand in a neutral pose and call:
 
 ```bash
 ros2 service call /dex_pico_teleop/calibrate std_srvs/srv/Trigger {}
+ros2 service call /dex_pico_teleop/calibrate_reach std_srvs/srv/Trigger {}
 ros2 service call /dex_pico_teleop/enabled std_srvs/srv/SetBool "{data: true}"
 ```
+
+The same actions are available from Pico controller clicks while tracking data
+is fresh: right `A` neutral-calibrates, right `B` calibrates reach, left `Y`
+enables teleop, and left `X` disables teleop. The CLI services above continue
+to work unchanged.
 
 Expected behavior:
 
 1. Torso follows headset/operator height after calibration.
-2. Each arm follows only while holding that controller's grip button.
+2. Each arm follows the corresponding controller's shoulder-relative posture
+   while teleop is enabled.
 3. Hand closing uses trigger values only if hand joint offsets are configured.
-4. Base motion remains gated by the configured deadman button.
+4. Base motion follows the controller joysticks and returns to zero when they
+   are centered.
 5. When an arm is driven toward the body or the other neutral arm, IK should
    slow or stop before the collision-sphere margin is crossed.
 
@@ -215,22 +204,120 @@ ros2 topic echo --once --full-length /dex_pico_teleop/log_frame
 `/dex_pico_teleop/status` should report `calibrated: true`,
 `enabled: true`, and `stale_input: false`. `/dex_pico_teleop/log_frame` should
 publish near the control rate and contain changing `torso`, `head`, `left_arm`,
-and `right_arm` arrays when the relevant inputs are active. The MeshCat node
-subscribes only to `/dex_pico_teleop/log_frame`, so it moves the simulated model
-and never publishes robot commands.
+and `right_arm` arrays plus optional `debug` retarget/timing data when teleop is
+enabled. The MeshCat node subscribes to `/dex_pico_teleop/log_frame`, so it
+moves the simulated model and never publishes robot commands.
 
 ## Calibration And Safety
 
 1. Start `dexcontrol_bridge` and verify `/joint_states`.
 2. Start this node with `publish_commands:=false` first.
 3. Stand in a neutral pose with both ankle trackers visible.
-4. Call `ros2 service call /dex_pico_teleop/calibrate std_srvs/srv/Trigger {}`.
-5. Enable teleop with `ros2 service call /dex_pico_teleop/enabled std_srvs/srv/SetBool "{data: true}"`.
-6. Re-launch with `publish_commands:=true` only after status looks correct.
+4. Click right `A` or call `ros2 service call /dex_pico_teleop/calibrate std_srvs/srv/Trigger {}`.
+5. Hold both controllers at comfortable full reach and click right `B`, or call `ros2 service call /dex_pico_teleop/calibrate_reach std_srvs/srv/Trigger {}`.
+6. Enable teleop with left `Y` or `ros2 service call /dex_pico_teleop/enabled std_srvs/srv/SetBool "{data: true}"`.
+7. Re-launch with `publish_commands:=true` only after status looks correct.
 
-Arm motion is hold-to-enable with the corresponding grip. Base motion is gated
-by the configured deadman button and publishes zero velocity whenever input is
-stale, held, disabled, or uncalibrated.
+Arm motion uses posture retargeting. The controller position is interpreted
+relative to the estimated operator shoulder, normalized by estimated operator
+arm length, and mapped onto the robot shoulder and arm reach. If reach
+calibration has been completed, the calibrated per-side arm lengths are used;
+otherwise the node falls back to the height-based estimate. Base motion
+follows the controller joysticks and publishes zero velocity whenever input is
+stale, held, disabled, uncalibrated, or inside the joystick deadzone. With the
+default base mapping, the left controller joystick commands body-frame
+forward/strafe velocity and the right controller horizontal joystick axis
+commands yaw velocity. Head joint tracking can be disabled with
+`head_tracking_enabled:=false`; in that mode the node commands the head to a
+fixed forward pose pitched down by `head_disabled_pitch_deg`.
 
 Hand commands are disabled until `*_hand_close_offsets` match the configured or
 discovered hand joint count.
+
+## XRoboToolkit Remote Vision
+
+The head-camera vision adapter is a separate process from teleop. It creates a
+single Dexmate camera stream subscriber for the ZED head camera and republishes
+that RGB stream over `dexcomm.rtc.VideoPublisher` for XRoboToolkit Remote
+Vision. It does not subscribe to or publish ROS image topics.
+
+Start the robot-side Dexmate services, including the camera sensor service, then
+launch the adapter:
+
+```bash
+python3 -m pip install dexcomm-video==0.4.19 av==17.1.0
+
+dextop node start
+dexsensor launch --sensor camera
+
+cd /workspaces/dexcontrol-ros/ros_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+RMW_IMPLEMENTATION=rmw_cyclonedds_cpp ros2 launch dex_pico_teleop head_camera_vision.launch.py
+```
+
+Default stream:
+
+- Dexmate source: `head_camera.left_rgb`
+- Dexmate source transport: `zenoh`
+- XRoboToolkit RTC channel:
+  `xrobotoolkit/remote_vision/head_camera/left_rgb_rtc`
+- Output: `1280x720`, `30 FPS`, H.264 preferred with VP8 fallback, `1.5 Mbps`
+
+Configure XRoboToolkit Remote Vision to subscribe to the RTC channel above. If
+the deployed XRoboToolkit profile uses a different channel name, pass it at
+launch:
+
+```bash
+ros2 launch dex_pico_teleop head_camera_vision.launch.py \
+  rtc_channel:=<xrobotoolkit-remote-vision-channel>
+```
+
+### XRoboToolkit ZED Mini Listen Mode
+
+The app's `ZEDMINI` -> `Listen` path does not subscribe to the RTC channel. It
+listens for a direct TCP H.264 stream on port `12345`. In that mode, launch the
+head-camera bridge with the Pico headset IP as `xrtcp_host`; do not use the
+Jetson IP for this parameter.
+
+In XRoboToolkit on the Pico headset:
+
+1. Open the Network panel and note the headset `IP`.
+2. Select `ZEDMINI`.
+3. Click `Listen`.
+4. Keep the streaming port at `12345`.
+
+On the Jetson/ROS host:
+
+```bash
+cd /workspaces/dexcontrol-ros/ros_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+RMW_IMPLEMENTATION=rmw_cyclonedds_cpp ros2 launch dex_pico_teleop head_camera_vision.launch.py \
+  rtc_enabled:=false \
+  xrtcp_enabled:=true \
+  xrtcp_host:=<pico-headset-ip> \
+  xrtcp_port:=12345 \
+  fps:=30.0 \
+  xrtcp_bitrate:=3000000 \
+  xrtcp_write_timeout_s:=2.0
+```
+
+The node duplicates the mono left RGB stream into a side-by-side stereo H.264
+frame because XRoboToolkit's ZED Mini path expects stereo video. If the headset
+connects successfully, the status topic reports `xrtcp_connected: true` and
+`xrtcp_output_frames` increasing. The RTC-only fields `connected` and
+`subscriber_count` may remain false/zero when `rtc_enabled:=false`.
+
+Useful status and runtime controls:
+
+```bash
+ros2 topic echo --once --full-length /dex_pico_teleop/head_camera_vision/status
+ros2 service call /dex_pico_teleop/head_camera_vision/enabled std_srvs/srv/SetBool "{data: false}"
+ros2 service call /dex_pico_teleop/head_camera_vision/enabled std_srvs/srv/SetBool "{data: true}"
+```
+
+The status topic reports frame counts, output dimensions, publish failures,
+connection state, and subscriber count. During teleop validation, compare this
+with `/dex_pico_teleop/log_frame` and `/joint_states`; video should drop or
+stall independently without making Pico input stale or changing command timing.
