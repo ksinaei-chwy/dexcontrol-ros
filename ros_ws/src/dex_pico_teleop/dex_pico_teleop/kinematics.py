@@ -8,7 +8,7 @@ the current development container where those packages are not installed.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -25,7 +25,17 @@ HEAD_JOINTS = ("head_j1", "head_j2", "head_j3")
 LEFT_ARM_JOINTS = tuple(f"L_arm_j{i}" for i in range(1, 8))
 RIGHT_ARM_JOINTS = tuple(f"R_arm_j{i}" for i in range(1, 8))
 ROBOT_SHOULDER_LATERAL_OFFSET_M = 0.16946
-ROBOT_ARM_REACH_M = 0.80
+ROBOT_ARM_REACH_M = 0.75
+# Keep both elbows bent away from the straight-arm singularity.  This is a
+# robot constraint, not a teleoperation tuning parameter.
+ARM_J4_UPPER_LIMIT_RAD = 0.0
+
+
+def clip_arm_j4_upper_limit(q: np.ndarray) -> np.ndarray:
+    """Return a seven-joint arm command capped at Vega's elbow limit."""
+    values = np.asarray(q, dtype=np.float64).reshape(7).copy()
+    values[3] = min(values[3], ARM_J4_UPPER_LIMIT_RAD)
+    return values
 
 
 @dataclass(frozen=True)
@@ -47,6 +57,12 @@ class IKSolution:
     success: bool
     error_norm: float
     iterations: int
+    termination: str = "converged"
+    initial_error_norm: float = 0.0
+    initial_position_error_norm: float = 0.0
+    initial_orientation_error_norm: float = 0.0
+    position_error_norm: float = 0.0
+    orientation_error_norm: float = 0.0
 
 
 class KinematicChain:
@@ -97,7 +113,34 @@ class KinematicChain:
                 )
             )
 
-        return _solve_error(q, self.clamp, error, damping, max_step, max_iterations, tolerance)
+        solution = _solve_error(
+            q,
+            self.clamp,
+            error,
+            damping,
+            max_step,
+            max_iterations,
+            tolerance,
+        )
+        initial_position_error, initial_orientation_error = _pose_error_norms(
+            self,
+            q,
+            target_position,
+            target_rotation,
+        )
+        position_error, orientation_error = _pose_error_norms(
+            self,
+            solution.q,
+            target_position,
+            target_rotation,
+        )
+        return replace(
+            solution,
+            initial_position_error_norm=initial_position_error,
+            initial_orientation_error_norm=initial_orientation_error,
+            position_error_norm=position_error,
+            orientation_error_norm=orientation_error,
+        )
 
 
 class VegaKinematics:
@@ -187,25 +230,137 @@ def _solve_error(
     tolerance: float,
 ) -> IKSolution:
     q = clamp_fn(q_seed)
-    last_norm = float("inf")
+    initial_error = np.asarray(error_fn(q), dtype=np.float64)
+    if not np.all(np.isfinite(initial_error)):
+        return IKSolution(
+            q=q,
+            success=False,
+            error_norm=float("inf"),
+            iterations=0,
+            termination="nonfinite",
+            initial_error_norm=float("inf"),
+        )
+    initial_norm = float(np.linalg.norm(initial_error))
+    best_q = q.copy()
+    best_norm = initial_norm
     for iteration in range(max_iterations):
-        err = error_fn(q)
+        err = np.asarray(error_fn(q), dtype=np.float64)
+        if not np.all(np.isfinite(err)):
+            return IKSolution(
+                q=best_q,
+                success=False,
+                error_norm=best_norm,
+                iterations=iteration,
+                termination="nonfinite",
+                initial_error_norm=initial_norm,
+            )
         err_norm = float(np.linalg.norm(err))
-        last_norm = err_norm
+        if err_norm < best_norm:
+            best_q = q.copy()
+            best_norm = err_norm
         if err_norm <= tolerance:
-            return IKSolution(q=q, success=True, error_norm=err_norm, iterations=iteration)
+            return IKSolution(
+                q=q,
+                success=True,
+                error_norm=err_norm,
+                iterations=iteration,
+                termination="converged",
+                initial_error_norm=initial_norm,
+            )
 
         jac = _finite_difference_jacobian(q, error_fn)
+        if not np.all(np.isfinite(jac)):
+            return IKSolution(
+                q=best_q,
+                success=False,
+                error_norm=best_norm,
+                iterations=iteration,
+                termination="nonfinite",
+                initial_error_norm=initial_norm,
+            )
         lhs = jac @ jac.T + (damping * damping) * np.eye(jac.shape[0])
         try:
             step = -jac.T @ np.linalg.solve(lhs, err)
         except np.linalg.LinAlgError:
             step = -np.linalg.pinv(jac) @ err
         step_norm = float(np.linalg.norm(step))
+        if not np.isfinite(step_norm):
+            return IKSolution(
+                q=best_q,
+                success=False,
+                error_norm=best_norm,
+                iterations=iteration,
+                termination="nonfinite",
+                initial_error_norm=initial_norm,
+            )
+        if step_norm < 1.0e-10:
+            return IKSolution(
+                q=best_q,
+                success=False,
+                error_norm=best_norm,
+                iterations=iteration,
+                termination="stalled",
+                initial_error_norm=initial_norm,
+            )
         if step_norm > max_step:
             step = step * (max_step / step_norm)
-        q = clamp_fn(q + step)
-    return IKSolution(q=q, success=last_norm <= tolerance * 2.0, error_norm=last_norm, iterations=max_iterations)
+        next_q = clamp_fn(q + step)
+        if np.linalg.norm(next_q - q) < 1.0e-12:
+            return IKSolution(
+                q=best_q,
+                success=False,
+                error_norm=best_norm,
+                iterations=iteration,
+                termination="stalled",
+                initial_error_norm=initial_norm,
+            )
+        q = next_q
+
+    final_error = np.asarray(error_fn(q), dtype=np.float64)
+    if np.all(np.isfinite(final_error)):
+        final_norm = float(np.linalg.norm(final_error))
+        if final_norm < best_norm:
+            best_q = q.copy()
+            best_norm = final_norm
+    else:
+        return IKSolution(
+            q=best_q,
+            success=False,
+            error_norm=best_norm,
+            iterations=max_iterations,
+            termination="nonfinite",
+            initial_error_norm=initial_norm,
+        )
+    converged = best_norm <= tolerance
+    return IKSolution(
+        q=best_q,
+        success=converged,
+        error_norm=best_norm,
+        iterations=max_iterations,
+        termination="converged" if converged else "max_iterations",
+        initial_error_norm=initial_norm,
+    )
+
+
+def _pose_error_norms(
+    chain: KinematicChain,
+    q: np.ndarray,
+    target_position: np.ndarray,
+    target_rotation: np.ndarray,
+) -> tuple[float, float]:
+    position, rotation = chain.forward(q)
+    position_error = float(
+        np.linalg.norm(np.asarray(target_position, dtype=np.float64).reshape(3) - position)
+    )
+    orientation_error = float(
+        np.linalg.norm(
+            rotation_error(
+                rotation,
+                np.asarray(target_rotation, dtype=np.float64).reshape(3, 3),
+            )
+        )
+    )
+    return position_error, orientation_error
 
 
 def _solve_torso_height_closed_form(
@@ -339,7 +494,12 @@ def _left_arm_specs() -> list[JointSpec]:
         _spec("L_arm_j1", [0.0, 0.16946, 0.0], [0.0, 1.0, 0.0], (-3.071, 3.071)),
         _spec("L_arm_j2", [0.04, 0.06, 0.0454], [0.0, 0.0, 1.0], (-0.453, 1.553)),
         _spec("L_arm_j3", [0.1644, 0.0, -0.043], [1.0, 0.0, 0.0], (-3.071, 3.071)),
-        _spec("L_arm_j4", [0.113, 0.0433, 0.06], [0.0, 1.0, 0.0], (-3.071, 0.244)),
+        _spec(
+            "L_arm_j4",
+            [0.113, 0.0433, 0.06],
+            [0.0, 1.0, 0.0],
+            (-3.071, ARM_J4_UPPER_LIMIT_RAD),
+        ),
         _spec("L_arm_j5", [0.1938, -0.0434, -0.04], [1.0, 0.0, 0.0], (-3.071, 3.071)),
         _spec("L_arm_j6", [0.0762, 0.0319, 0.0], [0.0, 1.0, 0.0], (-1.396, 1.396)),
         _spec("L_arm_j7", [0.065, -0.032, 0.0319], [0.0, 0.0, 1.0], (-1.378, 1.117)),
@@ -353,7 +513,12 @@ def _right_arm_specs() -> list[JointSpec]:
         _spec("R_arm_j1", [0.0, -0.16946, 0.0], [0.0, -1.0, 0.0], (-3.071, 3.071)),
         _spec("R_arm_j2", [0.04, -0.06, 0.0454], [0.0, 0.0, 1.0], (-1.553, 0.453)),
         _spec("R_arm_j3", [0.1644, 0.0, -0.043], [1.0, 0.0, 0.0], (-3.071, 3.071)),
-        _spec("R_arm_j4", [0.113, 0.0433, 0.06], [0.0, 1.0, 0.0], (-3.071, 0.244)),
+        _spec(
+            "R_arm_j4",
+            [0.113, 0.0433, 0.06],
+            [0.0, 1.0, 0.0],
+            (-3.071, ARM_J4_UPPER_LIMIT_RAD),
+        ),
         _spec("R_arm_j5", [0.1938, -0.0434, -0.04], [1.0, 0.0, 0.0], (-3.071, 3.071)),
         _spec("R_arm_j6", [0.0762, -0.0319, 0.0], [0.0, -1.0, 0.0], (-1.396, 1.396)),
         _spec("R_arm_j7", [0.065, 0.032, 0.0319], [0.0, 0.0, 1.0], (-1.117, 1.378)),

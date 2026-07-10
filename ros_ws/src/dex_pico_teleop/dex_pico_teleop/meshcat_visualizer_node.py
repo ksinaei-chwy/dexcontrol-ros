@@ -13,6 +13,12 @@ from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 
+from dex_pico_teleop.hand_retargeting import (
+    f5d6_joint_names,
+    f5d6_visual_joint_names,
+    f5d6_visual_joint_positions,
+)
+from dex_pico_teleop.collision_profiles import filter_geometry_model
 from dex_pico_teleop.kinematics import (
     HEAD_JOINTS,
     LEFT_ARM_JOINTS,
@@ -26,6 +32,8 @@ ACTION_JOINTS = {
     "head": HEAD_JOINTS,
     "left_arm": LEFT_ARM_JOINTS,
     "right_arm": RIGHT_ARM_JOINTS,
+    "left_hand": f5d6_joint_names("left"),
+    "right_hand": f5d6_joint_names("right"),
 }
 
 
@@ -40,6 +48,10 @@ class PicoMeshcatVisualizer(Node):
         self.declare_parameter("meshcat_use_joint_state_initial_pose", True)
         self.declare_parameter("meshcat_show_visuals", True)
         self.declare_parameter("meshcat_show_collisions", False)
+        self.declare_parameter("collision_urdf_path", "")
+        self.declare_parameter("pink_collision_pipeline", "reduced_all_pairs")
+        self.declare_parameter("pink_collision_sphere_count", 18)
+        self.declare_parameter("pink_collision_sphere_inflation", 1.0)
 
         self._pin = None
         self._model = None
@@ -73,17 +85,38 @@ class PicoMeshcatVisualizer(Node):
         self._pin = pin
         urdf_path = self._robot_urdf_path()
         package_dirs = [str(Path(get_package_share_directory("dexmate_vega_description")).parent)]
-        model, collision_model, visual_model = pin.buildModelsFromUrdf(
+        model, _default_collision_model, visual_model = pin.buildModelsFromUrdf(
             str(urdf_path),
             package_dirs,
         )
+        collision_urdf_path = self._collision_urdf_path()
+        collision_model = pin.buildGeomFromUrdf(
+            model,
+            str(collision_urdf_path),
+            pin.GeometryType.COLLISION,
+            None,
+            package_dirs,
+        )
+        pipeline = str(self.get_parameter("pink_collision_pipeline").value).lower()
+        if pipeline == "reduced_all_pairs":
+            filter_geometry_model(
+                collision_model,
+                int(self.get_parameter("pink_collision_sphere_count").value),
+                float(self.get_parameter("pink_collision_sphere_inflation").value),
+            )
+        elif pipeline != "closest_pairs":
+            raise ValueError(
+                "pink_collision_pipeline must be 'reduced_all_pairs' or 'closest_pairs'"
+            )
         self._model = model
         self._data = model.createData()
         self._q = pin.neutral(model)
         self._joint_indices = {
             name: int(model.joints[model.getJointId(name)].idx_q)
-            for names in ACTION_JOINTS.values()
-            for name in names
+            for name in (
+                *(name for names in ACTION_JOINTS.values() for name in names),
+                *f5d6_visual_joint_names(),
+            )
             if model.existJointName(name)
         }
         if model.existFrame("arm_center"):
@@ -109,6 +142,19 @@ class PicoMeshcatVisualizer(Node):
             return Path(configured)
         description_share = Path(get_package_share_directory("dexmate_vega_description"))
         return description_share / "urdf" / "vega_1p_f5d6.package.urdf"
+
+    def _collision_urdf_path(self) -> Path:
+        configured = str(self.get_parameter("collision_urdf_path").value)
+        if configured:
+            return Path(configured)
+        description_share = Path(get_package_share_directory("dexmate_vega_description"))
+        return (
+            description_share
+            / "robots"
+            / "humanoid"
+            / "vega_1p"
+            / "vega_1p_f5d6_collision_spheres.collision.urdf"
+        )
 
     def _on_log_frame(self, msg: String) -> None:
         if self._viz is None or self._q is None:
@@ -154,7 +200,12 @@ class PicoMeshcatVisualizer(Node):
                 raise ValueError(
                     f"{component} expected {len(joint_names)} values, got {values.size}"
                 )
-            for name, value in zip(joint_names, values):
+            if component in {"left_hand", "right_hand"}:
+                side = component.removesuffix("_hand")
+                positions = f5d6_visual_joint_positions(side, values)
+            else:
+                positions = dict(zip(joint_names, values))
+            for name, value in positions.items():
                 index = self._joint_indices.get(name)
                 if index is not None:
                     self._q[index] = float(value)
@@ -178,6 +229,7 @@ class PicoMeshcatVisualizer(Node):
             shoulder = _array3(data.get("operator_shoulder"))
             controller = _array3(data.get("controller_position"))
             controller_rotation = _matrix3(data.get("controller_rotation"))
+            hand_point = _array3(data.get("hand_point_position"))
             robot_shoulder = _array3(data.get("robot_shoulder"))
             robot_target = _array3(data.get("robot_target"))
             robot_target_rotation = _matrix3(data.get("robot_target_rotation"))
@@ -193,8 +245,28 @@ class PicoMeshcatVisualizer(Node):
                     controller_rotation,
                     0.10,
                 )
-            if shoulder is not None and controller is not None:
-                self._set_line(f"debug/operator/{side}_reach", shoulder, controller, color)
+            if hand_point is not None:
+                self._set_marker(
+                    f"debug/operator/{side}_hand_point",
+                    hand_point,
+                    color,
+                    0.022,
+                )
+            if controller is not None and hand_point is not None:
+                self._set_line(
+                    f"debug/operator/{side}_controller_to_hand",
+                    controller,
+                    hand_point,
+                    0xE6E6E6,
+                )
+            reach_point = hand_point if hand_point is not None else controller
+            if shoulder is not None and reach_point is not None:
+                self._set_line(
+                    f"debug/operator/{side}_reach",
+                    shoulder,
+                    reach_point,
+                    color,
+                )
 
             if robot_shoulder is not None:
                 world_shoulder = self._arm_center_point_to_world(robot_shoulder)

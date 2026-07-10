@@ -15,6 +15,8 @@ def make_log_frame_payload(
     left_q: np.ndarray,
     right_q: np.ndarray,
     debug: dict[str, Any] | None = None,
+    left_hand_q: np.ndarray | None = None,
+    right_hand_q: np.ndarray | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "timestamp_ns": int(timestamp_ns),
@@ -26,6 +28,14 @@ def make_log_frame_payload(
             "right_arm": np.asarray(right_q, dtype=np.float64).reshape(-1).tolist(),
         },
     }
+    if left_hand_q is not None:
+        payload["action"]["left_hand"] = (
+            np.asarray(left_hand_q, dtype=np.float64).reshape(-1).tolist()
+        )
+    if right_hand_q is not None:
+        payload["action"]["right_hand"] = (
+            np.asarray(right_hand_q, dtype=np.float64).reshape(-1).tolist()
+        )
     if debug is not None:
         payload["debug"] = debug
     return payload

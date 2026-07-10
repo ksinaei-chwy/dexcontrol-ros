@@ -16,22 +16,30 @@ pico_teleop_node:
     # "numeric" only for local dry-run/debug sessions.
     kinematics_backend: pink
     robot_urdf_path: ""
-    pink_qp_solver: quadprog
-    pink_self_collision_enabled: false
+    pink_qp_solver: proxqp
+    pink_self_collision_enabled: true
     pink_self_collision_components: [left_arm, right_arm]
     pink_self_collision_srdf_path: ""
     pink_self_collision_urdf_path: ""
     pink_self_collision_max_pairs: 24
     pink_self_collision_min_distance: 0.04
-    pink_self_collision_gain: 1.0
+    # CBF approach gain. 6.0 makes the arms responsive when approaching the
+    # 4 cm surface-distance boundary; it does not reduce that boundary.
+    pink_self_collision_gain: 6.0
     pink_self_collision_safe_displacement_gain: 0.0
-    pink_velocity_limit_enabled: false
+    # The bimanual controller keeps all valid pairs of this compact model in
+    # a fixed order.  `closest_pairs` restores Pink's legacy closest-pair path.
+    pink_collision_pipeline: reduced_all_pairs
+    pink_collision_sphere_count: 18
+    pink_collision_sphere_inflation: 1.0
+    pink_velocity_limit_enabled: true
     pink_task_gain: 1.0
     pink_lm_damping: 1.0e-6
     pink_solve_damping: 1.0e-8
     pink_torso_max_iterations: 25
     pink_head_max_iterations: 8
     pink_arm_max_iterations: 6
+    pink_self_collision_arm_max_iterations: 2
     pink_arm_position_cost: 1.0
     pink_arm_orientation_cost: 0.1
 
@@ -49,8 +57,12 @@ pico_teleop_node:
     operator_arm_length_ratio: 0.44
     operator_arm_length_min_m: 0.45
     operator_arm_length_max_m: 0.85
+    left_controller_to_hand_point_xyz_m: [0.0, 0.0, 0.0]
+    right_controller_to_hand_point_xyz_m: [0.0, 0.0, 0.0]
+    calibration_sample_window_s: 0.4
+    calibration_min_samples: 10
     robot_shoulder_lateral_offset_m: 0.16946
-    robot_arm_reach_m: 0.80
+    robot_arm_reach_m: 0.75
 
     joystick_deadzone: 0.12
     base_vx_scale: 0.35
@@ -63,12 +75,18 @@ pico_teleop_node:
     max_arm_joint_delta_per_tick: 0.08
     max_base_delta_per_tick: 0.032
 
-    # Leave empty to discover F5D6-style hand joints from /joint_states.
-    # Set these explicitly if dexcontrol exposes six aggregate hand DoF instead.
-    left_hand_joint_names: []
-    right_hand_joint_names: []
+    # Enabled only by pico_teleop_dry_run.launch.py.  This makes IK consume a
+    # delayed position-servo posture rather than its own last command.
+    dry_run_simulated_feedback_enabled: false
+    dry_run_max_joint_velocity_rad_s: 1.5
+    dry_run_max_joint_acceleration_rad_s2: 6.0
 
-    # Hand motion is disabled until close offsets match the discovered/configured
-    # joint count. Offsets are relative to the calibrated open hand position.
-    left_hand_close_offsets: []
-    right_hand_close_offsets: []
+    # F5D6 six-command order: thumb flexion, four finger flexions, then thumb
+    # opposition. Trigger interpolates the first five endpoints; grip controls
+    # only the final thumb-opposition endpoint.
+    left_hand_joint_names: [L_th_j1, L_ff_j1, L_mf_j1, L_rf_j1, L_lf_j1, L_th_j0]
+    right_hand_joint_names: [R_th_j1, R_ff_j1, R_mf_j1, R_rf_j1, R_lf_j1, R_th_j0]
+    left_hand_open_positions: [0.1834, 0.2891, 0.2801, 0.2840, 0.2811, -0.0158]
+    left_hand_closed_positions: [-0.1, -1.0946, -1.0844, -1.0154, -1.0118, 0.84]
+    right_hand_open_positions: [0.1834, 0.2891, 0.2801, 0.2840, 0.2811, -0.0158]
+    right_hand_closed_positions: [-0.1, -1.0946, -1.0844, -1.0154, -1.0118, 0.84]

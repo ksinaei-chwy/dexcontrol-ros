@@ -63,11 +63,17 @@ class NetworkReceiver:
 
     def get_latest(self) -> PicoPacket | None:
         latest: PicoPacket | None = None
+        for packet in self.get_available():
+            latest = packet
+        return latest
+
+    def get_available(self) -> list[PicoPacket]:
+        packets: list[PicoPacket] = []
         while True:
             try:
-                latest = self._queue.get_nowait()
+                packets.append(self._queue.get_nowait())
             except queue.Empty:
-                return latest
+                return packets
 
     def _run_udp(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
