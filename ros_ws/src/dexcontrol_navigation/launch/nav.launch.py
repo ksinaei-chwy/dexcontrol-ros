@@ -20,7 +20,7 @@ def generate_launch_description() -> LaunchDescription:
     scan_merger_config = nav_share / "config" / "scan_merger.yaml"
     scan_self_filter_config = nav_share / "config" / "scan_self_filter.yaml"
     nav2_params = nav_share / "config" / "nav2_params.yaml"
-    default_map = nav_share / "maps" / "office_area_initial_map.yaml"
+    default_map = nav_share / "maps" / "lab_test.yaml"
     bringup_launch = nav2_share / "launch" / "bringup_launch.py"
 
     return LaunchDescription(

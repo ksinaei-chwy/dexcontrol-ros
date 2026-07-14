@@ -92,7 +92,7 @@ Launch against a saved map:
 
 ```bash
 ros2 launch dexcontrol_navigation nav.launch.py \
-  map:="/workspaces/$PROJECT_NAME/ros_ws/src/dexcontrol_navigation/maps/thor_initial.yaml" \
+  map:="/workspaces/$PROJECT_NAME/ros_ws/src/dexcontrol_navigation/maps/lab_test.yaml" \
   use_rviz:=true
 ```
 

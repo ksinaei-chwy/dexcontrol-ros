@@ -441,7 +441,8 @@
     <parent link="L_arm_l3" />
     <child link="L_arm_l4" />
     <axis xyz="0 1 0" />
-    <limit lower="-3.071" upper="0.244" effort="80" velocity="2.7" />
+    <!-- Keep the elbow out of the straight-arm singularity. -->
+    <limit lower="-3.071" upper="0.0" effort="80" velocity="2.7" />
   </joint>
   <link name="L_arm_l5">
     <inertial>
@@ -654,7 +655,8 @@
     <parent link="R_arm_l3" />
     <child link="R_arm_l4" />
     <axis xyz="0 1 0" />
-    <limit lower="-3.071" upper="0.244" effort="80" velocity="2.7" />
+    <!-- Keep the elbow out of the straight-arm singularity. -->
+    <limit lower="-3.071" upper="0.0" effort="80" velocity="2.7" />
   </joint>
   <link name="R_arm_l5">
     <inertial>
