@@ -7,6 +7,28 @@ timer, defaulting to 250 Hz.
 ## Topics and Service
 
 - Publishes `/joint_states` with arms, torso, head, hands, and optionally chassis joints.
+- Publishes `/dexcontrol/measured_joint_states` as
+  `sensor_msgs/msg/JointState` only when real position and velocity feedback is
+  available for every controlled joint. `/joint_states` retains its historical
+  zero-velocity fallback for compatibility; recorders should use the strict
+  topic.
+- Publishes `/dexcontrol/applied_joint_commands` as
+  `sensor_msgs/msg/JointState` as a read-only audit stream of post-clipping
+  absolute targets. A partial vendor failure produces a partial-name message so
+  strict consumers invalidate the tick; this is not a command input.
+- Publishes `/dexcontrol/applied_base_twist` as
+  `geometry_msgs/msg/TwistStamped` after a successful chassis velocity API call,
+  including watchdog/e-stop zero commands.
+  A failed chassis call publishes a non-finite invalidation marker; recorders
+  must reject that sample rather than reuse an ambiguous recent command.
+- Publishes `/dexcontrol/measured_base_twist` as
+  `geometry_msgs/msg/TwistStamped` only when chassis steering/wheel feedback can
+  produce a measured velocity. Unlike `/odom`, this topic never falls back to
+  the cached command.
+- Publishes `/dexcontrol/estop_state` as `std_msgs/msg/Bool` at the E-stop poll
+  rate, when the vendor E-stop component is available, and immediately after a
+  successful `/soft_estop` request. Consumers may use it as a fresh execution
+  gate; they must never infer E-stop state from an absent message.
 - Publishes `/dexcontrol/joint_feedback` with dexcontrol-specific feedback: positions,
   velocities, currents, torques, error codes, driver timestamps, and fingertip force
   when exposed by the hand API.
@@ -22,6 +44,11 @@ timer, defaulting to 250 Hz.
   end-effector frames come from the Vega URDF.
 - Provides `/soft_estop` as `std_srvs/SetBool`: `true` activates software e-stop,
   `false` releases it.
+
+Joint targets are cached and continuously dispatched; there is currently no
+joint-command timeout. A command source that stops publishing therefore leaves
+the bridge holding its most recently cached joint targets. Base commands are
+different: the bridge's `cmd_vel_timeout_s` watchdog sends zero after timeout.
 
 ## Build and Run
 

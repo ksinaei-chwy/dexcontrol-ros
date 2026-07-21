@@ -11,11 +11,18 @@ from typing import Any, Final
 import numpy as np
 import rclpy
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
-from geometry_msgs.msg import Quaternion, TransformStamped, Twist, WrenchStamped
+from geometry_msgs.msg import (
+    Quaternion,
+    TransformStamped,
+    Twist,
+    TwistStamped,
+    WrenchStamped,
+)
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.time import Time
 from sensor_msgs.msg import JointState, PointCloud2, PointField
+from std_msgs.msg import Bool
 from std_srvs.srv import SetBool
 from tf2_ros import TransformBroadcaster
 
@@ -78,6 +85,9 @@ class DexcontrolBridge(Node):
 
         qos_depth = int(self.get_parameter("qos_depth").value)
         self.joint_state_pub = self.create_publisher(JointState, "joint_states", qos_depth)
+        self.measured_joint_state_pub = self.create_publisher(
+            JointState, "dexcontrol/measured_joint_states", qos_depth
+        )
         self.joint_feedback_pub = self.create_publisher(
             DiagnosticArray, "dexcontrol/joint_feedback", qos_depth
         )
@@ -85,6 +95,18 @@ class DexcontrolBridge(Node):
             DiagnosticArray, "dexcontrol/lidar_feedback", qos_depth
         )
         self.odom_pub = self.create_publisher(Odometry, "odom", qos_depth)
+        self.applied_joint_command_pub = self.create_publisher(
+            JointState, "dexcontrol/applied_joint_commands", qos_depth
+        )
+        self.applied_base_twist_pub = self.create_publisher(
+            TwistStamped, "dexcontrol/applied_base_twist", qos_depth
+        )
+        self.measured_base_twist_pub = self.create_publisher(
+            TwistStamped, "dexcontrol/measured_base_twist", qos_depth
+        )
+        self.estop_state_pub = self.create_publisher(
+            Bool, "dexcontrol/estop_state", qos_depth
+        )
         self.pointcloud_pubs: dict[str, Any] = {}
         for sensor_name in self._lidar_3d_sensors:
             self.pointcloud_pubs[sensor_name] = self.create_publisher(
@@ -417,6 +439,7 @@ class DexcontrolBridge(Node):
             else:
                 estop.deactivate()
             self._estop_active = bool(request.data)
+            self._publish_estop_state()
             response.success = True
             response.message = (
                 "Software e-stop activated"
@@ -463,8 +486,14 @@ class DexcontrolBridge(Node):
                 status.get("button_pressed", False)
                 or status.get("software_estop_enabled", False)
             )
+            self._publish_estop_state()
         except Exception as exc:
             self._warn_throttled("estop_status", f"Could not read e-stop status: {exc}")
+
+    def _publish_estop_state(self) -> None:
+        msg = Bool()
+        msg.data = self._estop_active
+        self.estop_state_pub.publish(msg)
 
     def _dispatch_joint_targets(self) -> None:
         if not bool(self.get_parameter("enable_joint_commands").value):
@@ -473,17 +502,34 @@ class DexcontrolBridge(Node):
             targets = {
                 name: target.copy() for name, target in self._joint_targets.items()
             }
+        successful_targets: list[tuple[str, np.ndarray]] = []
         for component_name, target in targets.items():
             component = self._command_components.get(component_name)
             if component is None:
                 continue
             try:
                 component.set_joint_pos(target, wait_time=0.0)
+                successful_targets.append((component_name, target))
             except Exception as exc:
                 self._warn_throttled(
                     f"dispatch_{component_name}",
                     f"Failed to command {component_name}: {exc}",
                 )
+
+        # This is an audit stream, not a control input.  A normal message is a
+        # complete whole-body command.  If one vendor call fails, publish only
+        # the successful subset so strict name-based consumers invalidate the
+        # tick instead of reusing a recent, now-ambiguous action.
+        if targets:
+            msg = JointState()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            for component_name, target in successful_targets:
+                joint_names = self._component_joint_names.get(component_name, [])
+                if len(joint_names) != len(target):
+                    continue
+                msg.name.extend(joint_names)
+                msg.position.extend(target.tolist())
+            self.applied_joint_command_pub.publish(msg)
 
     def _dispatch_cmd_vel(self) -> None:
         if not bool(self.get_parameter("enable_cmd_vel").value):
@@ -500,7 +546,11 @@ class DexcontrolBridge(Node):
                 wait_time=0.0,
                 sequential_steering=False,
             )
+            self._publish_applied_base_twist(twist)
         except Exception as exc:
+            self._publish_applied_base_twist(
+                np.full(3, np.nan, dtype=np.float64)
+            )
             self._warn_throttled("dispatch_cmd_vel", f"Failed to command chassis: {exc}")
 
     def _dispatch_zero_base(self) -> None:
@@ -509,7 +559,11 @@ class DexcontrolBridge(Node):
             return
         try:
             chassis.set_velocity(0.0, 0.0, 0.0, wait_time=0.0, sequential_steering=False)
+            self._publish_applied_base_twist(np.zeros(3, dtype=np.float64))
         except Exception as exc:
+            self._publish_applied_base_twist(
+                np.full(3, np.nan, dtype=np.float64)
+            )
             self._warn_throttled("zero_base", f"Failed to send zero base command: {exc}")
 
     def _current_cmd_vel_or_zero(self) -> np.ndarray:
@@ -523,9 +577,21 @@ class DexcontrolBridge(Node):
                 self._cmd_vel[:] = 0.0
             return self._cmd_vel.copy()
 
+    def _publish_applied_base_twist(self, values: np.ndarray) -> None:
+        msg = TwistStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = str(self.get_parameter("base_frame").value)
+        msg.twist.linear.x = float(values[0])
+        msg.twist.linear.y = float(values[1])
+        msg.twist.angular.z = float(values[2])
+        self.applied_base_twist_pub.publish(msg)
+
     def _publish_joint_state(self) -> None:
         msg = JointState()
         msg.header.stamp = self.get_clock().now().to_msg()
+        measured_msg = JointState()
+        measured_msg.header.stamp = msg.header.stamp
+        complete_measured_command_state = True
 
         efforts: list[float] = []
         for component_name, component in self._state_components.items():
@@ -544,9 +610,27 @@ class DexcontrolBridge(Node):
             msg.velocity.extend((vel if vel is not None else np.zeros_like(pos)).tolist())
             efforts.extend(effort.tolist())
 
+            if component_name in self._command_components:
+                if vel is None:
+                    complete_measured_command_state = False
+                else:
+                    measured_msg.name.extend(joint_names)
+                    measured_msg.position.extend(pos.tolist())
+                    measured_msg.velocity.extend(vel.tolist())
+
         if msg.name:
             msg.effort = efforts
             self.joint_state_pub.publish(msg)
+        if (
+            complete_measured_command_state
+            and measured_msg.name
+            and len(measured_msg.name)
+            == sum(
+                len(self._component_joint_names.get(name, []))
+                for name in self._command_components
+            )
+        ):
+            self.measured_joint_state_pub.publish(measured_msg)
 
     def _publish_joint_feedback(self) -> None:
         msg = DiagnosticArray()
@@ -797,7 +881,9 @@ class DexcontrolBridge(Node):
         ]
         return status
 
-    def _pointcloud2_from_lidar(self, sensor_name: str, data: dict[str, Any]) -> PointCloud2 | None:
+    def _pointcloud2_from_lidar(
+        self, sensor_name: str, data: dict[str, Any]
+    ) -> PointCloud2 | None:
         x = np.asarray(data.get("x", []), dtype=np.float32).reshape(-1)
         y = np.asarray(data.get("y", []), dtype=np.float32).reshape(-1)
         z = np.asarray(data.get("z", []), dtype=np.float32).reshape(-1)
@@ -868,7 +954,17 @@ class DexcontrolBridge(Node):
         if dt <= 0.0:
             return
 
-        vx_body, vy_body, wz = self._estimate_base_twist()
+        measured_twist = self._read_measured_base_twist()
+        if measured_twist is not None:
+            vx_body, vy_body, wz = measured_twist
+            self._publish_measured_base_twist(measured_twist, now)
+        else:
+            twist = self._current_cmd_vel_or_zero()
+            vx_body, vy_body, wz = (
+                float(twist[0]),
+                float(twist[1]),
+                float(twist[2]),
+            )
         yaw_cos = math.cos(self._odom_yaw)
         yaw_sin = math.sin(self._odom_yaw)
         self._odom_x += (vx_body * yaw_cos - vy_body * yaw_sin) * dt
@@ -928,20 +1024,41 @@ class DexcontrolBridge(Node):
         self.odom_pub.publish(msg)
 
     def _estimate_base_twist(self) -> tuple[float, float, float]:
-        if bool(self.get_parameter("use_measured_chassis_for_odom").value):
-            chassis = self._get_robot_component(CHASSIS_COMPONENT)
-            if chassis is not None:
-                try:
-                    steering = np.asarray(chassis.steering_angle, dtype=np.float64)
-                    wheel_velocity = np.asarray(chassis.wheel_velocity, dtype=np.float64)
-                    return self._twist_from_chassis_state(chassis, steering, wheel_velocity)
-                except Exception as exc:
-                    self._warn_throttled(
-                        "measured_odom",
-                        f"Measured chassis odometry unavailable, using cmd_vel: {exc}",
-                    )
+        measured = self._read_measured_base_twist()
+        if measured is not None:
+            return measured
         twist = self._current_cmd_vel_or_zero()
         return float(twist[0]), float(twist[1]), float(twist[2])
+
+    def _read_measured_base_twist(self) -> tuple[float, float, float] | None:
+        if not bool(self.get_parameter("use_measured_chassis_for_odom").value):
+            return None
+        chassis = self._get_robot_component(CHASSIS_COMPONENT)
+        if chassis is None:
+            return None
+        try:
+            steering = np.asarray(chassis.steering_angle, dtype=np.float64)
+            wheel_velocity = np.asarray(chassis.wheel_velocity, dtype=np.float64)
+            return self._twist_from_chassis_state(chassis, steering, wheel_velocity)
+        except Exception as exc:
+            self._warn_throttled(
+                "measured_odom",
+                f"Measured chassis odometry unavailable, using cmd_vel: {exc}",
+            )
+            return None
+
+    def _publish_measured_base_twist(
+        self,
+        values: tuple[float, float, float],
+        stamp: Time,
+    ) -> None:
+        msg = TwistStamped()
+        msg.header.stamp = stamp.to_msg()
+        msg.header.frame_id = str(self.get_parameter("base_frame").value)
+        msg.twist.linear.x = values[0]
+        msg.twist.linear.y = values[1]
+        msg.twist.angular.z = values[2]
+        self.measured_base_twist_pub.publish(msg)
 
     def _twist_from_chassis_state(
         self, chassis: Any, steering: np.ndarray, wheel_velocity: np.ndarray
