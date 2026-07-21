@@ -3,17 +3,21 @@ dexmate_head_camera_vision:
     enabled: true
     qos_depth: 10
 
-    # Dexmate ZED head camera source. The adapter subscribes to only this RGB
-    # stream through the Dexmate camera stream API, not ROS image topics.
+    # DexTop source: direct, capacity-one DexComm subscriptions. RGB and depth
+    # stay outside ROS/DDS so headset backpressure cannot stall acquisition.
     sensor_name: head_camera
     stream_name: left_rgb
     camera_transport: zenoh
+    camera_topic: sensors/head_camera/left_rgb
+    source_rtc_channel: sensors/head_camera/left_rgb_rtc
+    source_codec: auto
+    depth_enabled: true
+    depth_topic: sensors/head_camera/depth
 
     # XRoboToolkit Remote Vision should subscribe to this RTC channel.
     rtc_enabled: true
     rtc_channel: xrobotoolkit/remote_vision/head_camera/left_rgb_rtc
     rtc_profile: local
-    source_codec: h264
     codec: auto
     width: 1280
     height: 720

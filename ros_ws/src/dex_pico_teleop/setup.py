@@ -21,7 +21,6 @@ setup(
         (f"share/{package_name}/launch", package_files("launch/*.launch.py")),
     ],
     install_requires=["setuptools"],
-    test_suite="test",
     zip_safe=True,
     maintainer="Dexmate ROS User",
     maintainer_email="contact@dexmate.ai",
