@@ -1,0 +1,31 @@
+# Exact venv-local resolution validated on Jetson Thor on 2026-07-17.
+# Packages inherited from NVIDIA's rootfs are pinned by the immutable image
+# digest in bootstrap_jetson_runtime.sh. Torch and torchvision must never be
+# added here or installed from PyPI.
+annotated-doc==0.0.4
+accelerate==1.14.0
+av==15.1.0
+click==8.4.2
+cloudpickle==3.1.2
+datasets==4.8.5
+diffusers==0.35.2
+dm-tree==0.1.9
+draccus==0.10.0
+farama-notifications==0.0.6
+gymnasium==1.3.0
+hf-xet==1.5.2
+huggingface-hub==1.24.0
+jsonlines==4.0.0
+lerobot==0.6.0
+mergedeep==1.3.4
+opencv-python-headless==4.13.0.92
+pandas==2.3.3
+peft==0.19.1
+pyarrow==22.0.0
+pyyaml-include==1.4.1
+termcolor==3.3.0
+timm==1.0.28
+toml==0.10.2
+transformers==5.5.4
+typer==0.27.0
+typing-inspect==0.9.0

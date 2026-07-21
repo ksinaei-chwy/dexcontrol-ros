@@ -1,0 +1,74 @@
+dex_vega_lerobot_inference:
+  ros__parameters:
+    # This candidate has no physical rollout authorization. The default process
+    # constructs no robot command publishers.
+    policy_type: groot
+    mode: observe_only
+    allow_command_publication: false
+    execution_readiness_acknowledged: false
+    load_model: true
+
+    # The external server is the only artifact selector. The ROS node discovers
+    # all three paths and identities over the local socket, verifies their
+    # project-local manifests, and rejects anything except the compiled pins.
+    project_root: "/workspaces/dexcontrol-ros/ros_ws"
+    allow_model_download: false
+    allow_non_commit_revision: false
+    local_files_only: true
+
+    device: cuda
+    require_cuda: true
+    require_bfloat16: true
+    runtime_backend: external
+    policy_server_socket: ".runtime/groot_n17_policy_server.sock"
+    policy_server_project_root: "/workspace"
+    policy_server_timeout_seconds: 180.0
+    task: "put the blue bird on the meeting desk"
+
+    camera_source: auto
+    replay_image_topic: "/dex_vega_lerobot_inference/replay/head_image"
+    joint_states_topic: "/joint_states"
+    measured_base_twist_topic: "/dexcontrol/measured_base_twist"
+    qos_depth: 10
+
+    control_frequency_hz: 30.0
+    # Measured GR00T cadence: the representative-input p95 complete-pipeline
+    # latency is below 0.165 s. A five-minute 2 Hz/18-step shadow had one queue
+    # starvation after a late observation window. At 3 Hz, 21 control steps
+    # cover two prediction periods (0.667 s) plus one control cycle while still
+    # remaining below the 0.75 s queue-age gate. This remains observe-only
+    # until separately acknowledged at launch.
+    inference_frequency_hz: 3.0
+    execution_horizon: 21
+
+    maximum_state_age_seconds: 0.10
+    maximum_receive_age_seconds: 0.10
+    maximum_capture_age_seconds: 0.30
+    maximum_transport_delay_seconds: 0.25
+    # A five-minute GR00T shadow sample at 0.15 s rejected transient skews up
+    # to 0.200 s and starved the simulated action queue. The 0.20 s bound is
+    # the measured live transport envelope and matches the separately reviewed
+    # PI hardware bound; state/capture/receive/transport age gates stay intact.
+    maximum_synchronization_skew_seconds: 0.20
+    maximum_action_queue_age_seconds: 0.75
+    maximum_observation_to_action_age_seconds: 1.35
+    action_wait_timeout_seconds: 0.75
+    maximum_execution_duration_seconds: 5.0
+
+    bridge_status_timeout_seconds: 0.25
+    estop_status_timeout_seconds: 0.25
+    teleop_status_timeout_seconds: 1.5
+    require_bridge_status: true
+    require_estop_status: true
+    require_teleop_disabled: true
+    require_bridge_subscribers: true
+    require_exclusive_command_publishers: true
+
+    max_torso_target_delta_per_cycle: 0.02
+    max_head_target_delta_per_cycle: 0.02
+    max_arm_target_delta_per_cycle: 0.02
+    max_hand_ratio_delta_per_cycle: 0.03
+    max_base_linear_velocity: 0.10
+    max_base_angular_velocity: 0.20
+    max_base_linear_acceleration: 0.30
+    max_base_angular_acceleration: 0.60

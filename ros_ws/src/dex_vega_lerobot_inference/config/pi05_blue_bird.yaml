@@ -1,0 +1,77 @@
+dex_vega_lerobot_inference:
+  ros__parameters:
+    # Default process is physically incapable of command publication.
+    mode: observe_only
+    allow_command_publication: false
+    load_model: true
+
+    # The external policy server is the single source of model/checkpoint and
+    # tokenizer identity. The ROS node discovers its paths and immutable
+    # commits over the local socket, then independently verifies the matching
+    # project-local manifests before becoming READY.
+    project_root: "/workspaces/dexcontrol-ros/ros_ws"
+    allow_model_download: false
+    allow_non_commit_revision: false
+    local_files_only: true
+
+    device: cuda
+    require_cuda: true
+    require_bfloat16: true
+    # ROS Humble uses Python 3.10 while LeRobot 0.6.0 requires Python >=3.12.
+    # Keep the default split-process boundary; embedded is for compatible ROS builds only.
+    runtime_backend: external
+    policy_server_socket: ".runtime/pi05_policy_server.sock"
+    policy_server_project_root: "/workspace"
+    policy_server_timeout_seconds: 120.0
+    task: "put the blue bird on the meeting desk"
+
+    camera_source: auto
+    replay_image_topic: "/dex_vega_lerobot_inference/replay/head_image"
+    joint_states_topic: "/joint_states"
+    measured_base_twist_topic: "/dexcontrol/measured_base_twist"
+    qos_depth: 10
+
+    control_frequency_hz: 30.0
+    # Measured on Thor at 0.423-0.432 s steady GPU inference. At 2 Hz the
+    # latest-observation worker ran without pending-observation replacements.
+    inference_frequency_hz: 2.0
+    # 18/50 steps is a 0.60 s receding horizon at 30 Hz, covering the measured
+    # 0.50 s inference cadence with 0.10 s scheduling margin.
+    execution_horizon: 18
+
+    maximum_state_age_seconds: 0.10
+    maximum_receive_age_seconds: 0.10
+    maximum_capture_age_seconds: 0.30
+    maximum_transport_delay_seconds: 0.25
+    # A 2026-07-21 non-executing sample of the 30k live path measured
+    # 0.144-0.150 s, and two arm attempts crossed the former 0.15 s gate at
+    # 0.151 s. The user requested 0.20 s for this camera path. The recorder's
+    # independent 0.30 s capture-age and 0.25 s transport-delay gates, plus all
+    # state/receive/action age gates below, remain enforced separately.
+    maximum_synchronization_skew_seconds: 0.20
+    maximum_action_queue_age_seconds: 0.75
+    maximum_observation_to_action_age_seconds: 1.35
+    action_wait_timeout_seconds: 0.75
+    # First hardware trial stops/faults after five seconds and requires recovery.
+    maximum_execution_duration_seconds: 5.0
+
+    # Armed execution fails closed unless bridge telemetry and E-stop state
+    # remain fresh. Pico status is required by default but has an explicit
+    # guarded-launch override for the confirmed no-Pico trial.
+    bridge_status_timeout_seconds: 0.25
+    estop_status_timeout_seconds: 0.25
+    teleop_status_timeout_seconds: 1.5
+    require_bridge_status: true
+    require_estop_status: true
+    require_teleop_disabled: true
+    require_bridge_subscribers: true
+    require_exclusive_command_publishers: true
+
+    max_torso_target_delta_per_cycle: 0.02
+    max_head_target_delta_per_cycle: 0.02
+    max_arm_target_delta_per_cycle: 0.02
+    max_hand_ratio_delta_per_cycle: 0.03
+    max_base_linear_velocity: 0.10
+    max_base_angular_velocity: 0.20
+    max_base_linear_acceleration: 0.30
+    max_base_angular_acceleration: 0.60

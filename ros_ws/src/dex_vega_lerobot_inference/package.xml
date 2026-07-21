@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>dex_vega_lerobot_inference</name>
+  <version>0.1.0</version>
+  <description>Guarded ROS 2 inference for LeRobot PI0.5 and GR00T policies on Dexmate Vega 1 Pro.</description>
+  <maintainer email="contact@dexmate.ai">Dexmate ROS User</maintainer>
+  <license>AGPL-3.0-or-later</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>dex_camera_transport</exec_depend>
+  <exec_depend>dexmate_vega_description</exec_depend>
+  <exec_depend>dex_vega_lerobot_recorder</exec_depend>
+  <exec_depend>diagnostic_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>rcl_interfaces</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>dexcontrol_ros</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

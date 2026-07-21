@@ -1,0 +1,133 @@
+# Production head-camera-only configuration for the blue-bird placement task.
+# This dataset is uploaded only after committed episodes have been finalized.
+dataset:
+  name: "dexmate_blue_bird"
+  local_save_directory: "/workspaces/dexcontrol-ros/ros_ws/data/production"
+  recording_fps: 30
+  task_instruction: "put the blue bird on the meeting desk"
+  robot_type: "dexmate_vega_1_pro"
+  use_videos: true
+
+hugging_face:
+  upload_enabled: true
+  namespace: "Kasra99"
+  repo_id: "Kasra99/dexmate_blue_bird"
+  private: true
+  upload_policy: "on_session_end"
+
+cameras:
+  head:
+    enabled: true
+    # Direct DexTop/DexComm source; independent of the Pico viewer stream.
+    stream_name: "left_rgb"
+    transport: "zenoh"
+    topic: "sensors/head_camera/left_rgb"
+    rtc_channel: "sensors/head_camera/left_rgb_rtc"
+    codec: "auto"
+    placeholder_enabled: false
+    # Preserve the current recorder resolution.
+    resolution:
+      width: 640
+      height: 480
+  left_wrist:
+    # Omit this feature entirely. No black placeholder video is recorded.
+    enabled: false
+    stream_name: ""
+    transport: "zenoh"
+    topic: ""
+    rtc_channel: ""
+    codec: "auto"
+    placeholder_enabled: false
+    resolution:
+      width: 640
+      height: 480
+  right_wrist:
+    # Omit this feature entirely. No black placeholder video is recorded.
+    enabled: false
+    stream_name: ""
+    transport: "zenoh"
+    topic: ""
+    rtc_channel: ""
+    codec: "auto"
+    placeholder_enabled: false
+    resolution:
+      width: 640
+      height: 480
+
+episode_control:
+  start_key: "a"
+  stop_key: "b"
+  save_key: "c"
+  discard_key: "d"
+  debounce_seconds: 0.25
+  minimum_frames: 10
+  minimum_duration_seconds: 0.5
+  input_backend: "terminal"
+  input_device: ""
+  autosave_on_shutdown: false
+
+validation:
+  maximum_state_age_seconds: 0.1
+  maximum_action_age_seconds: 0.1
+  maximum_receive_age_seconds: 0.10
+  maximum_capture_age_seconds: 0.30
+  maximum_transport_delay_seconds: 0.25
+
+topics:
+  joint_states: "/joint_states"
+  applied_joint_commands: "/dexcontrol/applied_joint_commands"
+  measured_base_twist: "/dexcontrol/measured_base_twist"
+  applied_base_twist: "/dexcontrol/applied_base_twist"
+
+# The fixed 27-D state/action representation used by the recorder.
+robot_features:
+  include_joint_velocities: false
+  joint_names:
+    - torso_j1
+    - torso_j2
+    - torso_j3
+    - head_j1
+    - head_j2
+    - head_j3
+    - L_arm_j1
+    - L_arm_j2
+    - L_arm_j3
+    - L_arm_j4
+    - L_arm_j5
+    - L_arm_j6
+    - L_arm_j7
+    - R_arm_j1
+    - R_arm_j2
+    - R_arm_j3
+    - R_arm_j4
+    - R_arm_j5
+    - R_arm_j6
+    - R_arm_j7
+    - L_th_j1
+    - L_ff_j1
+    - L_mf_j1
+    - L_rf_j1
+    - L_lf_j1
+    - L_th_j0
+    - R_th_j1
+    - R_ff_j1
+    - R_mf_j1
+    - R_rf_j1
+    - R_lf_j1
+    - R_th_j0
+  hand_synergies:
+    left:
+      joint_names: [L_th_j1, L_ff_j1, L_mf_j1, L_rf_j1, L_lf_j1, L_th_j0]
+      open_positions: [0.1834, 0.2891, 0.2801, 0.2840, 0.2811, -0.0158]
+      closed_positions: [-0.1, -1.0946, -1.0844, -1.0154, -1.0118, 0.84]
+      action_ratio_tolerance: 0.02
+    right:
+      joint_names: [R_th_j1, R_ff_j1, R_mf_j1, R_rf_j1, R_lf_j1, R_th_j0]
+      open_positions: [0.1834, 0.2891, 0.2801, 0.2840, 0.2811, -0.0158]
+      closed_positions: [-0.1, -1.0946, -1.0844, -1.0154, -1.0118, 0.84]
+      action_ratio_tolerance: 0.02
+
+writer:
+  frame_queue_size: 64
+  image_writer_threads: 4
+  streaming_encoding: false
