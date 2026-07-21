@@ -1,0 +1,24 @@
+# Local LeRobot recordings and transient image/video writer data.
+data/
+datasets/
+lerobot_datasets/
+**/.cache/
+.pytest_cache/
+**/images/
+**/videos/
+*.mp4
+*.parquet
+
+# Python and ROS build artifacts.
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+install/
+log/
+
+# Project-local policy environments, models, Hub caches, and Unix sockets.
+.venvs/
+models/
+.runtime/
+.cache/huggingface/
