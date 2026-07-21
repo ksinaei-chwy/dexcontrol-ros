@@ -39,6 +39,26 @@ def generate_launch_description() -> LaunchDescription:
                 description="Dexmate camera source transport: rtc or zenoh.",
             ),
             DeclareLaunchArgument(
+                "camera_topic",
+                default_value="sensors/head_camera/left_rgb",
+                description="Direct DexTop/DexComm RGB Zenoh topic.",
+            ),
+            DeclareLaunchArgument(
+                "source_rtc_channel",
+                default_value="sensors/head_camera/left_rgb_rtc",
+                description="Direct DexTop RGB RTC channel when RTC input is used.",
+            ),
+            DeclareLaunchArgument(
+                "depth_enabled",
+                default_value="true",
+                description="Monitor the direct DexTop depth stream.",
+            ),
+            DeclareLaunchArgument(
+                "depth_topic",
+                default_value="sensors/head_camera/depth",
+                description="Direct DexTop/DexComm float32 depth Zenoh topic.",
+            ),
+            DeclareLaunchArgument(
                 "rtc_enabled",
                 default_value="true",
                 description="Enable DexComm RTC Remote Vision output.",
@@ -130,6 +150,15 @@ def generate_launch_description() -> LaunchDescription:
                         "camera_transport": LaunchConfiguration(
                             "camera_transport"
                         ),
+                        "camera_topic": LaunchConfiguration("camera_topic"),
+                        "source_rtc_channel": LaunchConfiguration(
+                            "source_rtc_channel"
+                        ),
+                        "depth_enabled": ParameterValue(
+                            LaunchConfiguration("depth_enabled"),
+                            value_type=bool,
+                        ),
+                        "depth_topic": LaunchConfiguration("depth_topic"),
                         "rtc_enabled": ParameterValue(
                             LaunchConfiguration("rtc_enabled"),
                             value_type=bool,

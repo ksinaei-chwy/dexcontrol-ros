@@ -414,10 +414,12 @@ affected hand rather than publishing a partial or non-finite command.
 
 ## XRoboToolkit Remote Vision
 
-The head-camera vision adapter is a separate process from teleop. It creates a
-single Dexmate camera stream subscriber for the ZED head camera and republishes
-that RGB stream over `dexcomm.rtc.VideoPublisher` for XRoboToolkit Remote
-Vision. It does not subscribe to or publish ROS image topics.
+The head-camera vision adapter is separate from teleop. It subscribes directly
+to the latest DexTop RGB and depth frames through DexComm. RGB is submitted to
+a capacity-one `dexcomm.rtc.VideoPublisher` worker for XRoboToolkit Remote
+Vision. Resize/encode/network work cannot block acquisition. Depth is monitored
+for rate, shape, and timing but is not sent to the headset. No raw ROS image
+topic is produced.
 
 Install the video dependencies once in the robot environment:
 
@@ -432,6 +434,8 @@ Default stream:
 
 - Dexmate source: `head_camera.left_rgb`
 - Dexmate source transport: `zenoh`
+- Direct RGB topic: `sensors/head_camera/left_rgb` (`uint8 RGB`)
+- Direct depth topic: `sensors/head_camera/depth` (`float32` metres)
 - XRoboToolkit RTC channel:
   `xrobotoolkit/remote_vision/head_camera/left_rgb_rtc`
 - Output: `1280x720`, `30 FPS`, H.264 preferred with VP8 fallback, `1.5 Mbps`
@@ -457,10 +461,10 @@ On the Jetson/ROS host, use the **Head-Camera Stream** ZED Mini command in
 [Runtime Commands](#runtime-commands).
 
 The node duplicates the mono left RGB stream into a side-by-side stereo H.264
-frame because XRoboToolkit's ZED Mini path expects stereo video. If the headset
-connects successfully, the status topic reports `xrtcp_connected: true` and
-`xrtcp_output_frames` increasing. The RTC-only fields `connected` and
-`subscriber_count` may remain false/zero when `rtc_enabled:=false`.
+frame because XRoboToolkit's ZED Mini path expects stereo video. This
+compatibility encoder/socket has its own capacity-one worker and is disabled by
+default. If enabled, the nested status object `xrtcp.connected` becomes true and
+`xrtcp.published_frames` increases.
 
 Useful status and runtime controls:
 
@@ -470,7 +474,8 @@ ros2 service call /dex_pico_teleop/head_camera_vision/enabled std_srvs/srv/SetBo
 ros2 service call /dex_pico_teleop/head_camera_vision/enabled std_srvs/srv/SetBool "{data: true}"
 ```
 
-The status topic reports frame counts, output dimensions, publish failures,
+The status topic reports independent RGB/depth source FPS, source/receive ages,
+transport delay, output queue replacements, processing time, failures,
 connection state, and subscriber count. During teleop validation, compare this
-with `/dex_pico_teleop/log_frame` and `/joint_states`; video should drop or
-stall independently without making Pico input stale or changing command timing.
+with `/dex_pico_teleop/log_frame` and `/joint_states`; video may drop or stall
+independently without making Pico input stale or changing command timing.

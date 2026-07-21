@@ -7,7 +7,6 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from dex_pico_teleop.head_camera_vision_node import (  # noqa: E402
-    configure_head_camera_stream,
     make_side_by_side_rgb_frame,
     normalize_rgb_frame,
     resize_rgb_frame,
@@ -16,28 +15,6 @@ from dex_pico_teleop.head_camera_vision_node import (  # noqa: E402
 
 
 class TestHeadCameraVision(unittest.TestCase):
-    def test_configure_head_camera_stream_enables_one_rgb_stream(self):
-        from dexcontrol.core.config import get_robot_config
-
-        configs = get_robot_config()
-        stream_config = configure_head_camera_stream(
-            configs,
-            sensor_name="head_camera",
-            stream_name="left_rgb",
-            transport="rtc",
-        )
-        sensor_config = configs.sensors["head_camera"]
-
-        self.assertTrue(sensor_config.enabled)
-        self.assertEqual(stream_config.name, "left_rgb")
-        self.assertTrue(stream_config.enabled)
-        self.assertEqual(stream_config.transport, "rtc")
-        self.assertEqual(
-            stream_config.rtc_channel,
-            "sensors/head_camera/left_rgb_rtc",
-        )
-        self.assertFalse(sensor_config.enable_depth)
-
     def test_normalize_rgb_frame_extracts_data_and_clips_dtype(self):
         raw = np.array([[[0.0, 127.2, 999.0, 42.0]]], dtype=np.float32)
         frame = normalize_rgb_frame({"data": raw})

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dexmate head-camera bridge for XRoboToolkit video outputs."""
+"""Direct DexTop head-camera bridge for XRoboToolkit video outputs."""
 
 from __future__ import annotations
 
@@ -9,15 +9,17 @@ import struct
 import threading
 import time
 import traceback
-from dataclasses import dataclass
 from fractions import Fraction
 from typing import Any
 
 import numpy as np
 import rclpy
+from dex_camera_transport import DexCommCameraSource, StreamKind
 from rclpy.node import Node
 from std_msgs.msg import String
 from std_srvs.srv import SetBool
+
+from .output_worker import LatestFrameOutputWorker
 
 
 RGB_STREAM_NAMES = {"left_rgb", "right_rgb", "rgb"}
@@ -28,17 +30,14 @@ XR_TCP_PACKET_HEADER = struct.Struct(">I")
 
 
 def normalize_rgb_frame(frame: Any) -> np.ndarray:
-    """Return a contiguous uint8 RGB frame from Dexmate camera data."""
+    """Return a contiguous uint8 RGB frame from decoded camera data."""
     if hasattr(frame, "data"):
         frame = frame.data
     if isinstance(frame, dict) and "data" in frame:
         frame = frame["data"]
-
     image = np.asarray(frame)
     if image.ndim != 3 or image.shape[2] < 3:
-        raise ValueError(
-            f"expected RGB image with shape HxWx3, got {image.shape}"
-        )
+        raise ValueError(f"expected RGB image with shape HxWx3, got {image.shape}")
     if image.shape[2] > 3:
         image = image[:, :, :3]
     if image.dtype != np.uint8:
@@ -47,17 +46,23 @@ def normalize_rgb_frame(frame: Any) -> np.ndarray:
 
 
 def resize_rgb_frame(frame: np.ndarray, width: int, height: int) -> np.ndarray:
-    """Resize an RGB frame with a dependency-free nearest-neighbor fallback."""
+    """Resize RGB using OpenCV, with a dependency-free nearest fallback."""
+    frame = normalize_rgb_frame(frame)
     if width <= 0 or height <= 0:
-        return np.ascontiguousarray(frame)
-
+        return frame
     src_height, src_width = frame.shape[:2]
     if src_width == width and src_height == height:
-        return np.ascontiguousarray(frame)
+        return frame
+    try:
+        import cv2
 
-    y_index = np.linspace(0, src_height - 1, height).astype(np.intp)
-    x_index = np.linspace(0, src_width - 1, width).astype(np.intp)
-    return np.ascontiguousarray(frame[y_index][:, x_index])
+        return np.ascontiguousarray(
+            cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+        )
+    except ImportError:
+        y_index = np.linspace(0, src_height - 1, height).astype(np.intp)
+        x_index = np.linspace(0, src_width - 1, width).astype(np.intp)
+        return np.ascontiguousarray(frame[y_index][:, x_index])
 
 
 def make_side_by_side_rgb_frame(frame: np.ndarray) -> np.ndarray:
@@ -72,119 +77,8 @@ def xrobotoolkit_packet_header(payload_size: int) -> bytes:
     return XR_TCP_PACKET_HEADER.pack(payload_size)
 
 
-def configure_head_camera_stream(
-    configs: Any,
-    sensor_name: str,
-    stream_name: str,
-    transport: str,
-) -> Any:
-    """Enable the head camera config and return one RGB stream config."""
-    stream_name = stream_name.lower()
-    transport = transport.lower()
-    if stream_name not in RGB_STREAM_NAMES:
-        raise ValueError(
-            f"stream_name must be one of {sorted(RGB_STREAM_NAMES)}"
-        )
-    if transport not in CAMERA_TRANSPORTS:
-        raise ValueError(
-            f"camera_transport must be one of {sorted(CAMERA_TRANSPORTS)}"
-        )
-    if not configs.has_sensor(sensor_name):
-        raise ValueError(
-            f"Dexmate config does not define sensor '{sensor_name}'"
-        )
-
-    configs.enable_sensor(sensor_name)
-    sensor_config = configs.sensors[sensor_name]
-    if not hasattr(sensor_config, stream_name):
-        raise ValueError(
-            f"sensor '{sensor_name}' has no stream '{stream_name}'"
-        )
-
-    sensor_config.enabled = True
-    if hasattr(sensor_config, "transport"):
-        sensor_config.transport = transport
-    if hasattr(sensor_config, "enable_rgb"):
-        sensor_config.enable_rgb = True
-    if hasattr(sensor_config, "enable_depth"):
-        sensor_config.enable_depth = False
-
-    stream_config = getattr(sensor_config, stream_name)
-    stream_config.transport = transport
-    return stream_config
-
-
-class DexmateCameraStreamReader:
-    """Read one Dexmate camera stream without creating robot components."""
-
-    def __init__(
-        self,
-        sensor_name: str,
-        stream_name: str,
-        transport: str,
-        codec: str = "h264",
-    ) -> None:
-        from dexcomm import Node as DexCommNode
-        if transport == "rtc":
-            from dexcomm.rtc import VideoCodec
-
-            if not hasattr(VideoCodec, "H265") and hasattr(VideoCodec, "H264"):
-                # dexcontrol versions that know about h265 build their codec
-                # map eagerly. Older dexcomm builds expose only H264 and VP8.
-                VideoCodec.H265 = VideoCodec.H264
-        from dexcontrol.core.config import get_robot_config
-        from dexcontrol.sensors.camera.base_camera import (
-            StreamSubscriber,
-            StreamType,
-            TransportType,
-        )
-
-        configs = get_robot_config()
-        stream_config = configure_head_camera_stream(
-            configs,
-            sensor_name=sensor_name,
-            stream_name=stream_name,
-            transport=transport,
-        )
-
-        self.stream_name = stream_name
-        self._node = None
-        if transport == "zenoh":
-            self._node = DexCommNode(
-                name=f"{sensor_name}_{stream_name}_vision_node"
-            )
-
-        self._stream = StreamSubscriber(
-            stream_name=stream_name,
-            transport=TransportType(transport),
-            stream_type=StreamType.RGB,
-            node=self._node,
-            topic=getattr(stream_config, "topic", None),
-            rtc_channel=getattr(stream_config, "rtc_channel", None),
-            codec=codec,
-            buffer_size=1,
-        )
-
-    def wait_for_active(
-        self,
-        timeout: float = 5.0,
-        require_all: bool = False,
-    ) -> bool:
-        del require_all
-        return self._stream.wait_for_message(timeout=timeout) is not None
-
-    def get_obs(self, obs_keys: list[str] | None = None) -> dict[str, Any]:
-        del obs_keys
-        return {self.stream_name: self._stream.get_latest()}
-
-    def shutdown(self) -> None:
-        self._stream.shutdown()
-        if self._node is not None:
-            self._node.shutdown()
-
-
 class XRobotoolkitTcpH264Publisher:
-    """Send H.264 frames to XRoboToolkit's ZED Mini TCP listener."""
+    """Send H.264 packets to XRoboToolkit's optional ZED Mini TCP listener."""
 
     def __init__(
         self,
@@ -205,20 +99,18 @@ class XRobotoolkitTcpH264Publisher:
             raise ValueError("xrtcp_port must be between 1 and 65535")
         if width <= 0 or height <= 0:
             raise ValueError("XRoboToolkit TCP output needs fixed dimensions")
-
         self.host = host
-        self.port = port
-        self.source_width = width
-        self.source_height = height
-        self.side_by_side = side_by_side
-        self.width = width * 2 if side_by_side else width
-        self.height = height
+        self.port = int(port)
+        self.source_width = int(width)
+        self.source_height = int(height)
+        self.side_by_side = bool(side_by_side)
+        self.width = self.source_width * 2 if self.side_by_side else self.source_width
+        self.height = self.source_height
         self.fps = max(int(fps), 1)
         self.bitrate = int(bitrate)
         self.connect_timeout_s = max(float(connect_timeout_s), 0.05)
         self.write_timeout_s = max(float(write_timeout_s), 0.1)
         self.reconnect_interval_s = max(float(reconnect_interval_s), 0.1)
-
         self._socket: socket.socket | None = None
         self._next_connect_time_s = 0.0
         self._codec: Any | None = None
@@ -228,27 +120,28 @@ class XRobotoolkitTcpH264Publisher:
         self.failures = 0
         self.last_error = ""
         self.last_publish_time_ns = 0
-
         self._reset_encoder()
 
     def publish(self, frame: np.ndarray) -> bool:
+        """Encode and send one frame; called only by the TCP output worker."""
         sock = self._ensure_socket()
         if sock is None:
             return False
-
         try:
-            output = make_side_by_side_rgb_frame(frame) if self.side_by_side else frame
+            output = (
+                make_side_by_side_rgb_frame(frame)
+                if self.side_by_side
+                else frame
+            )
             video_frame = self._video_frame(output)
-            packets = self._codec.encode(video_frame)
             sent_packet = False
-            for packet in packets:
+            for packet in self._codec.encode(video_frame):
                 payload = bytes(packet)
                 if not payload:
                     continue
                 sock.sendall(xrobotoolkit_packet_header(len(payload)))
                 sock.sendall(payload)
                 sent_packet = True
-
             if sent_packet:
                 self.output_frames += 1
                 self.last_publish_time_ns = time.time_ns()
@@ -272,8 +165,7 @@ class XRobotoolkitTcpH264Publisher:
         import av
 
         video_frame = av.VideoFrame.from_ndarray(
-            np.ascontiguousarray(frame),
-            format="rgb24",
+            np.ascontiguousarray(frame), format="rgb24"
         )
         video_frame.pts = self._frame_index
         video_frame.time_base = Fraction(1, self.fps)
@@ -283,16 +175,13 @@ class XRobotoolkitTcpH264Publisher:
     def _ensure_socket(self) -> socket.socket | None:
         if self._socket is not None:
             return self._socket
-
         now_s = time.monotonic()
         if now_s < self._next_connect_time_s:
             return None
         self._next_connect_time_s = now_s + self.reconnect_interval_s
-
         try:
             sock = socket.create_connection(
-                (self.host, self.port),
-                timeout=self.connect_timeout_s,
+                (self.host, self.port), timeout=self.connect_timeout_s
             )
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             try:
@@ -328,7 +217,6 @@ class XRobotoolkitTcpH264Publisher:
                 "PyAV is required for XRoboToolkit ZED Mini TCP output. "
                 "Install it with: python3 -m pip install av==17.1.0"
             ) from exc
-
         codec = av.CodecContext.create("libx264", "w")
         codec.width = self.width
         codec.height = self.height
@@ -351,119 +239,42 @@ class XRobotoolkitTcpH264Publisher:
         self._frame_index = 0
 
 
-@dataclass
-class VisionStats:
-    status: str = "stopped"
-    input_frames: int = 0
-    output_frames: int = 0
-    rtc_output_frames: int = 0
-    read_failures: int = 0
-    publish_failures: int = 0
-    last_error: str = ""
-    source_shape: tuple[int, ...] | None = None
-    output_width: int = 0
-    output_height: int = 0
-    output_codec: str = ""
-    last_input_time_ns: int = 0
-    last_publish_time_ns: int = 0
-    connected: bool = False
-    subscriber_count: int = 0
-    rtc_enabled: bool = True
-    xrtcp_enabled: bool = False
-    xrtcp_host: str = ""
-    xrtcp_port: int = 12345
-    xrtcp_connected: bool = False
-    xrtcp_output_frames: int = 0
-    xrtcp_failures: int = 0
-    xrtcp_last_error: str = ""
-    xrtcp_last_publish_time_ns: int = 0
-    xrtcp_output_width: int = 0
-    xrtcp_output_height: int = 0
-    xrtcp_side_by_side: bool = True
-
-    def to_dict(self) -> dict[str, object]:
-        now_ns = time.time_ns()
-        input_age_s = (
-            (now_ns - self.last_input_time_ns) / 1.0e9
-            if self.last_input_time_ns
-            else None
-        )
-        publish_age_s = (
-            (now_ns - self.last_publish_time_ns) / 1.0e9
-            if self.last_publish_time_ns
-            else None
-        )
-        xrtcp_publish_age_s = (
-            (now_ns - self.xrtcp_last_publish_time_ns) / 1.0e9
-            if self.xrtcp_last_publish_time_ns
-            else None
-        )
-        return {
-            "status": self.status,
-            "input_frames": self.input_frames,
-            "output_frames": self.output_frames,
-            "rtc_output_frames": self.rtc_output_frames,
-            "read_failures": self.read_failures,
-            "publish_failures": self.publish_failures,
-            "last_error": self.last_error,
-            "source_shape": (
-                list(self.source_shape) if self.source_shape else None
-            ),
-            "output_width": self.output_width,
-            "output_height": self.output_height,
-            "output_codec": self.output_codec,
-            "last_input_age_s": input_age_s,
-            "last_publish_age_s": publish_age_s,
-            "connected": self.connected,
-            "subscriber_count": self.subscriber_count,
-            "rtc_enabled": self.rtc_enabled,
-            "xrtcp_enabled": self.xrtcp_enabled,
-            "xrtcp_host": self.xrtcp_host,
-            "xrtcp_port": self.xrtcp_port,
-            "xrtcp_connected": self.xrtcp_connected,
-            "xrtcp_output_frames": self.xrtcp_output_frames,
-            "xrtcp_failures": self.xrtcp_failures,
-            "xrtcp_last_error": self.xrtcp_last_error,
-            "xrtcp_last_publish_age_s": xrtcp_publish_age_s,
-            "xrtcp_output_width": self.xrtcp_output_width,
-            "xrtcp_output_height": self.xrtcp_output_height,
-            "xrtcp_side_by_side": self.xrtcp_side_by_side,
-        }
-
-
 class DexmateHeadCameraVisionNode(Node):
-    """Read Dexmate head-camera RGB frames and publish headset video outputs."""
+    """Read DexTop directly and fan frames into isolated headset workers."""
 
     def __init__(self) -> None:
         super().__init__("dexmate_head_camera_vision")
         self._declare_parameters()
-
-        qos_depth = int(self.get_parameter("qos_depth").value)
         self._status_pub = self.create_publisher(
             String,
             "/dex_pico_teleop/head_camera_vision/status",
-            qos_depth,
+            int(self.get_parameter("qos_depth").value),
         )
         self.create_service(
             SetBool,
             "/dex_pico_teleop/head_camera_vision/enabled",
             self._on_enabled,
         )
-
-        self._stats = VisionStats()
-        self._stats_lock = threading.Lock()
+        self._state_lock = threading.Lock()
+        self._io_lock = threading.Lock()
+        self._status = "stopped"
+        self._last_error = ""
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
-        self._camera: Any | None = None
-        self._publisher: Any | None = None
+        self._rgb_source: DexCommCameraSource | None = None
+        self._depth_source: DexCommCameraSource | None = None
+        self._rtc_publisher: Any | None = None
+        self._rtc_codec = "disabled"
+        self._rtc_worker: LatestFrameOutputWorker | None = None
         self._xrtcp_publisher: XRobotoolkitTcpH264Publisher | None = None
-
+        self._xrtcp_worker: LatestFrameOutputWorker | None = None
+        self._output_width = 0
+        self._output_height = 0
+        self._last_submitted_sequence = 0
         status_rate_hz = float(self.get_parameter("status_rate_hz").value)
         self._status_timer = self.create_timer(
-            1.0 / max(status_rate_hz, 0.1),
-            self._publish_status,
+            1.0 / max(status_rate_hz, 0.1), self._publish_status
         )
-
         if bool(self.get_parameter("enabled").value):
             self._start_stream()
         else:
@@ -475,13 +286,19 @@ class DexmateHeadCameraVisionNode(Node):
         self.declare_parameter("sensor_name", "head_camera")
         self.declare_parameter("stream_name", "left_rgb")
         self.declare_parameter("camera_transport", "zenoh")
+        self.declare_parameter("camera_topic", "sensors/head_camera/left_rgb")
+        self.declare_parameter(
+            "source_rtc_channel", "sensors/head_camera/left_rgb_rtc"
+        )
+        self.declare_parameter("source_codec", "auto")
+        self.declare_parameter("depth_enabled", True)
+        self.declare_parameter("depth_topic", "sensors/head_camera/depth")
         self.declare_parameter("rtc_enabled", True)
         self.declare_parameter(
             "rtc_channel",
             "xrobotoolkit/remote_vision/head_camera/left_rgb_rtc",
         )
         self.declare_parameter("rtc_profile", "local")
-        self.declare_parameter("source_codec", "h264")
         self.declare_parameter("codec", "auto")
         self.declare_parameter("width", 1280)
         self.declare_parameter("height", 720)
@@ -499,17 +316,13 @@ class DexmateHeadCameraVisionNode(Node):
         self.declare_parameter("status_rate_hz", 1.0)
 
     def _on_enabled(
-        self,
-        request: SetBool.Request,
-        response: SetBool.Response,
+        self, request: SetBool.Request, response: SetBool.Response
     ) -> SetBool.Response:
         if request.data:
             started = self._start_stream()
             response.success = started
             response.message = (
-                "head camera vision enabled"
-                if started
-                else "stream already running"
+                "head camera vision enabled" if started else "stream already running"
             )
         else:
             self._stop_stream()
@@ -532,212 +345,144 @@ class DexmateHeadCameraVisionNode(Node):
 
     def _stop_stream(self) -> None:
         self._stop_event.set()
-        if self._thread is not None:
+        thread, self._thread = self._thread, None
+        if thread is not None and thread is not threading.current_thread():
             try:
-                self._thread.join(timeout=2.0)
+                thread.join(timeout=3.0)
             except KeyboardInterrupt:
-                self.get_logger().warn(
-                    "interrupted while waiting for vision worker shutdown"
-                )
-            self._thread = None
+                self.get_logger().warn("interrupted while stopping vision worker")
         self._shutdown_io()
 
     def _run_stream(self) -> None:
         try:
             self._set_status("starting")
-            self._camera = self._make_camera()
-            self._wait_for_camera()
-
-            first_frame = self._wait_for_first_frame()
-            output_width, output_height = self._output_dimensions(first_frame)
-            self._prepare_outputs(output_width, output_height)
-            if self._publisher is None and self._xrtcp_publisher is None:
-                raise RuntimeError("no video outputs are enabled")
-            with self._stats_lock:
-                self._stats.output_width = output_width
-                self._stats.output_height = output_height
+            self._rgb_source = self._make_rgb_source()
+            if bool(self.get_parameter("depth_enabled").value):
+                self._depth_source = DexCommCameraSource(
+                    stream_name="depth",
+                    stream_kind=StreamKind.DEPTH,
+                    topic=str(self.get_parameter("depth_topic").value),
+                    transport="zenoh",
+                )
+            timeout = float(self.get_parameter("first_frame_timeout_s").value)
+            first = self._rgb_source.wait_for_frame(timeout)
+            if first is None:
+                raise RuntimeError(
+                    f"no direct RGB frame received within {timeout:.1f}s"
+                )
+            self._output_width, self._output_height = self._output_dimensions(
+                first.data
+            )
+            self._prepare_outputs()
+            if self._rtc_worker is None and self._xrtcp_worker is None:
+                raise RuntimeError("no headset video outputs are enabled")
             self._set_status("streaming")
-
-            if first_frame is not None:
-                self._publish_frame(first_frame)
-
-            period_s = 1.0 / max(float(self.get_parameter("fps").value), 1.0)
-            next_publish_s = time.monotonic()
             while not self._stop_event.is_set():
-                frame = self._read_frame()
-                if frame is None:
-                    with self._stats_lock:
-                        self._stats.read_failures += 1
-                else:
-                    self._publish_frame(frame)
-
-                next_publish_s += period_s
-                sleep_s = next_publish_s - time.monotonic()
-                if sleep_s > 0.0:
-                    self._stop_event.wait(sleep_s)
-                else:
-                    next_publish_s = time.monotonic()
+                frame = self._rgb_source.latest()
+                if frame is not None and frame.sequence != self._last_submitted_sequence:
+                    self._last_submitted_sequence = frame.sequence
+                    if self._rtc_worker is not None:
+                        self._rtc_worker.submit(frame.data, frame.sequence)
+                    if self._xrtcp_worker is not None:
+                        self._xrtcp_worker.submit(frame.data, frame.sequence)
+                self._stop_event.wait(0.001)
         except Exception as exc:  # noqa: BLE001 - runtime hardware boundary
             self.get_logger().error(f"head camera vision failed: {exc}")
             self.get_logger().debug(traceback.format_exc())
-            with self._stats_lock:
-                self._stats.status = "error"
-                self._stats.last_error = str(exc)
+            with self._state_lock:
+                self._status = "error"
+                self._last_error = str(exc)
         finally:
             self._shutdown_io()
             if self._stop_event.is_set():
                 self._set_status("stopped")
 
-    def _prepare_outputs(self, output_width: int, output_height: int) -> None:
-        rtc_enabled = bool(self.get_parameter("rtc_enabled").value)
-        xrtcp_enabled = bool(self.get_parameter("xrtcp_enabled").value)
-        with self._stats_lock:
-            self._stats.rtc_enabled = rtc_enabled
-            self._stats.xrtcp_enabled = xrtcp_enabled
-            if not rtc_enabled:
-                self._stats.output_codec = "disabled"
-
-        if rtc_enabled:
-            try:
-                publisher, output_codec = self._make_publisher(
-                    output_width,
-                    output_height,
-                )
-                self._publisher = publisher
-                with self._stats_lock:
-                    self._stats.output_codec = output_codec
-            except Exception:
-                if not xrtcp_enabled:
-                    raise
-                self.get_logger().warn(
-                    "RTC publisher could not be started; continuing with "
-                    "XRoboToolkit ZED Mini TCP output"
-                )
-                self.get_logger().debug(traceback.format_exc())
-
-        if xrtcp_enabled:
-            self._xrtcp_publisher = self._make_xrtcp_publisher(
-                output_width,
-                output_height,
-            )
-
-    def _make_camera(self) -> Any:
-        sensor_name = str(self.get_parameter("sensor_name").value)
-        stream_name = str(self.get_parameter("stream_name").value)
-        transport = str(self.get_parameter("camera_transport").value)
+    def _make_rgb_source(self) -> DexCommCameraSource:
+        stream_name = str(self.get_parameter("stream_name").value).lower()
+        transport = str(self.get_parameter("camera_transport").value).lower()
         source_codec = str(self.get_parameter("source_codec").value).lower()
-        if source_codec not in SOURCE_CODECS:
+        if stream_name not in RGB_STREAM_NAMES:
+            raise ValueError(f"stream_name must be one of {sorted(RGB_STREAM_NAMES)}")
+        if transport not in CAMERA_TRANSPORTS:
             raise ValueError(
-                f"source_codec must be one of {sorted(SOURCE_CODECS)}"
+                f"camera_transport must be one of {sorted(CAMERA_TRANSPORTS)}"
             )
-
+        if source_codec not in SOURCE_CODECS:
+            raise ValueError(f"source_codec must be one of {sorted(SOURCE_CODECS)}")
+        topic = str(self.get_parameter("camera_topic").value)
         self.get_logger().info(
-            "starting Dexmate camera "
-            f"'{sensor_name}.{stream_name}' via {transport}"
+            f"subscribing directly to DexTop RGB '{topic}' via {transport}; "
+            "no ROS image mirror is created"
         )
-        return DexmateCameraStreamReader(
-            sensor_name=sensor_name,
+        return DexCommCameraSource(
             stream_name=stream_name,
+            stream_kind=StreamKind.RGB,
+            topic=topic,
             transport=transport,
+            rtc_channel=str(self.get_parameter("source_rtc_channel").value),
             codec=source_codec,
         )
 
-    def _wait_for_camera(self) -> None:
-        timeout_s = float(self.get_parameter("first_frame_timeout_s").value)
-        if hasattr(self._camera, "wait_for_active"):
-            active = bool(
-                self._camera.wait_for_active(
-                    timeout=timeout_s,
-                    require_all=False,
-                )
-            )
-            if not active:
-                self.get_logger().warn(
-                    "camera stream did not become active within "
-                    f"{timeout_s:.1f}s"
-                )
-
-    def _wait_for_first_frame(self) -> np.ndarray | None:
-        timeout_s = float(self.get_parameter("first_frame_timeout_s").value)
-        deadline_s = time.monotonic() + max(timeout_s, 0.0)
-        while not self._stop_event.is_set() and time.monotonic() <= deadline_s:
-            frame = self._read_frame()
-            if frame is not None:
-                return frame
-            time.sleep(0.02)
-
-        if (
-            int(self.get_parameter("width").value) <= 0
-            or int(self.get_parameter("height").value) <= 0
-        ):
-            raise RuntimeError(
-                "no camera frame available to auto-detect output dimensions"
-            )
-        self.get_logger().warn(
-            "no first camera frame yet; starting RTC publisher with "
-            "configured dimensions"
-        )
-        return None
-
-    def _read_frame(self) -> np.ndarray | None:
-        if self._camera is None:
-            return None
-        stream_name = str(self.get_parameter("stream_name").value)
-        try:
-            obs = self._camera.get_obs(obs_keys=[stream_name])
-            raw_frame = obs.get(stream_name) if isinstance(obs, dict) else obs
-            if raw_frame is None:
-                return None
-            frame = normalize_rgb_frame(raw_frame)
-            with self._stats_lock:
-                self._stats.input_frames += 1
-                self._stats.source_shape = tuple(
-                    int(value) for value in frame.shape
-                )
-                self._stats.last_input_time_ns = time.time_ns()
-                self._stats.last_error = ""
-            return frame
-        except Exception as exc:  # noqa: BLE001 - runtime hardware boundary
-            with self._stats_lock:
-                self._stats.read_failures += 1
-                self._stats.last_error = f"read: {exc}"
-            return None
-
-    def _output_dimensions(
-        self,
-        first_frame: np.ndarray | None,
-    ) -> tuple[int, int]:
+    def _output_dimensions(self, first_frame: np.ndarray) -> tuple[int, int]:
         width = int(self.get_parameter("width").value)
         height = int(self.get_parameter("height").value)
         if width > 0 and height > 0:
             return width, height
-        assert first_frame is not None
         src_height, src_width = first_frame.shape[:2]
         return src_width, src_height
 
-    def _make_publisher(self, width: int, height: int) -> tuple[Any, str]:
+    def _prepare_outputs(self) -> None:
+        def transform(frame: np.ndarray) -> np.ndarray:
+            return resize_rgb_frame(
+                frame, self._output_width, self._output_height
+            )
+        rtc_enabled = bool(self.get_parameter("rtc_enabled").value)
+        xrtcp_enabled = bool(self.get_parameter("xrtcp_enabled").value)
+        if rtc_enabled:
+            try:
+                self._rtc_publisher, self._rtc_codec = self._make_rtc_publisher()
+                self._rtc_worker = LatestFrameOutputWorker(
+                    name="rtc",
+                    publish=self._publish_rtc,
+                    transform=transform,
+                )
+            except Exception:
+                if not xrtcp_enabled:
+                    raise
+                self.get_logger().warn(
+                    "RTC output failed to start; continuing with optional ZED TCP"
+                )
+                self.get_logger().debug(traceback.format_exc())
+        if xrtcp_enabled:
+            self._xrtcp_publisher = self._make_xrtcp_publisher()
+            self._xrtcp_worker = LatestFrameOutputWorker(
+                name="xrtcp",
+                publish=self._xrtcp_publisher.publish,
+                transform=transform,
+            )
+
+    def _make_rtc_publisher(self) -> tuple[Any, str]:
         from dexcomm.rtc import VideoPublisher
 
         channel = str(self.get_parameter("rtc_channel").value)
         fps = int(round(float(self.get_parameter("fps").value)))
         bitrate = int(self.get_parameter("bitrate").value)
-        config = self._rtc_config()
         errors: list[str] = []
         for codec_name, codec in self._video_codecs():
             try:
                 publisher = VideoPublisher(
                     channel,
                     codec,
-                    width,
-                    height,
+                    self._output_width,
+                    self._output_height,
                     fps,
                     bitrate,
-                    config,
+                    self._rtc_config(),
                 )
                 self.get_logger().info(
                     "publishing XRoboToolkit Remote Vision RTC channel "
-                    f"'{channel}' {width}x{height}@{fps} "
-                    f"{codec_name.upper()} {bitrate}bps"
+                    f"'{channel}' {self._output_width}x{self._output_height}@{fps} "
+                    f"{codec_name.upper()} {bitrate}bps on an isolated worker"
                 )
                 return publisher, codec_name
             except Exception as exc:  # noqa: BLE001 - codec boundary
@@ -745,56 +490,35 @@ class DexmateHeadCameraVisionNode(Node):
                 self.get_logger().warn(
                     f"failed to create {codec_name.upper()} RTC publisher: {exc}"
                 )
-
         raise RuntimeError(
-            "failed to create an RTC video publisher with available codecs "
-            f"({'; '.join(errors)}). Install the encoder-enabled dexcomm-video "
-            "package or choose a codec supported by this runtime."
+            "failed to create RTC video publisher " f"({'; '.join(errors)})"
         )
 
-    def _make_xrtcp_publisher(
-        self,
-        width: int,
-        height: int,
-    ) -> XRobotoolkitTcpH264Publisher:
-        host = str(self.get_parameter("xrtcp_host").value).strip()
-        port = int(self.get_parameter("xrtcp_port").value)
-        fps = int(round(float(self.get_parameter("fps").value)))
-        bitrate = int(self.get_parameter("xrtcp_bitrate").value)
-        side_by_side = bool(self.get_parameter("xrtcp_side_by_side").value)
-        connect_timeout_s = float(
-            self.get_parameter("xrtcp_connect_timeout_s").value
-        )
-        write_timeout_s = float(
-            self.get_parameter("xrtcp_write_timeout_s").value
-        )
-        reconnect_interval_s = float(
-            self.get_parameter("xrtcp_reconnect_interval_s").value
-        )
+    def _publish_rtc(self, frame: np.ndarray) -> bool:
+        assert self._rtc_publisher is not None
+        self._rtc_publisher.publish(frame, bgr=False)
+        return True
 
+    def _make_xrtcp_publisher(self) -> XRobotoolkitTcpH264Publisher:
         publisher = XRobotoolkitTcpH264Publisher(
-            host=host,
-            port=port,
-            width=width,
-            height=height,
-            fps=fps,
-            bitrate=bitrate,
-            side_by_side=side_by_side,
-            connect_timeout_s=connect_timeout_s,
-            write_timeout_s=write_timeout_s,
-            reconnect_interval_s=reconnect_interval_s,
+            host=str(self.get_parameter("xrtcp_host").value).strip(),
+            port=int(self.get_parameter("xrtcp_port").value),
+            width=self._output_width,
+            height=self._output_height,
+            fps=int(round(float(self.get_parameter("fps").value))),
+            bitrate=int(self.get_parameter("xrtcp_bitrate").value),
+            side_by_side=bool(self.get_parameter("xrtcp_side_by_side").value),
+            connect_timeout_s=float(
+                self.get_parameter("xrtcp_connect_timeout_s").value
+            ),
+            write_timeout_s=float(self.get_parameter("xrtcp_write_timeout_s").value),
+            reconnect_interval_s=float(
+                self.get_parameter("xrtcp_reconnect_interval_s").value
+            ),
         )
-        with self._stats_lock:
-            self._stats.xrtcp_host = host
-            self._stats.xrtcp_port = port
-            self._stats.xrtcp_side_by_side = side_by_side
-            self._stats.xrtcp_output_width = publisher.width
-            self._stats.xrtcp_output_height = publisher.height
-
-        self.get_logger().info(
-            "publishing XRoboToolkit ZED Mini TCP stream to "
-            f"{host}:{port} {publisher.width}x{publisher.height}@{fps} "
-            f"H264 {bitrate}bps"
+        self.get_logger().warn(
+            "ZED Mini TCP compatibility output is enabled on an isolated worker; "
+            "RTC Remote Vision is the production path"
         )
         return publisher
 
@@ -804,9 +528,7 @@ class DexmateHeadCameraVisionNode(Node):
         codec_name = str(self.get_parameter("codec").value).lower()
         if codec_name not in OUTPUT_CODECS:
             raise ValueError(f"codec must be one of {sorted(OUTPUT_CODECS)}")
-        if codec_name == "auto":
-            return [("h264", VideoCodec.H264), ("vp8", VideoCodec.VP8)]
-        if codec_name == "h264":
+        if codec_name in {"auto", "h264"}:
             return [("h264", VideoCodec.H264), ("vp8", VideoCodec.VP8)]
         return [("vp8", VideoCodec.VP8)]
 
@@ -820,128 +542,122 @@ class DexmateHeadCameraVisionNode(Node):
             return RtcConfig.internet()
         raise ValueError("rtc_profile must be 'local' or 'internet'")
 
-    def _publish_frame(self, frame: np.ndarray) -> None:
-        if self._publisher is None and self._xrtcp_publisher is None:
-            return
-        width = int(self._stats.output_width)
-        height = int(self._stats.output_height)
-        try:
-            output = resize_rgb_frame(frame, width, height)
-        except Exception as exc:  # noqa: BLE001 - runtime hardware boundary
-            with self._stats_lock:
-                self._stats.publish_failures += 1
-                self._stats.last_error = f"resize: {exc}"
-            return
-
-        frame_published = False
-        if self._publisher is not None:
-            try:
-                self._publisher.publish(output, bgr=False)
-                connected = bool(self._publisher.is_connected())
-                subscriber_count = int(self._publisher.subscriber_count())
-                with self._stats_lock:
-                    self._stats.rtc_output_frames += 1
-                    self._stats.connected = connected
-                    self._stats.subscriber_count = subscriber_count
-                    self._stats.last_error = ""
-                frame_published = True
-            except Exception as exc:  # noqa: BLE001 - runtime hardware boundary
-                with self._stats_lock:
-                    self._stats.publish_failures += 1
-                    self._stats.last_error = f"rtc publish: {exc}"
-
-        if self._xrtcp_publisher is not None:
-            sent = self._xrtcp_publisher.publish(output)
-            with self._stats_lock:
-                self._stats.xrtcp_connected = (
-                    self._xrtcp_publisher.is_connected()
-                )
-                self._stats.xrtcp_output_frames = (
-                    self._xrtcp_publisher.output_frames
-                )
-                self._stats.xrtcp_failures = self._xrtcp_publisher.failures
-                self._stats.xrtcp_last_error = (
-                    self._xrtcp_publisher.last_error
-                )
-                self._stats.xrtcp_last_publish_time_ns = (
-                    self._xrtcp_publisher.last_publish_time_ns
-                )
-            frame_published = frame_published or sent
-
-        if frame_published:
-            with self._stats_lock:
-                self._stats.output_frames += 1
-                self._stats.last_publish_time_ns = time.time_ns()
-        elif self._xrtcp_publisher is None:
-            with self._stats_lock:
-                self._stats.publish_failures += 1
-                self._stats.last_error = "no output accepted frame"
-
-    def _refresh_output_status(self) -> None:
-        if self._publisher is not None:
-            try:
-                with self._stats_lock:
-                    self._stats.connected = bool(
-                        self._publisher.is_connected()
-                    )
-                    self._stats.subscriber_count = int(
-                        self._publisher.subscriber_count()
-                    )
-            except Exception:
-                pass
-
-        if self._xrtcp_publisher is not None:
-            with self._stats_lock:
-                self._stats.xrtcp_connected = (
-                    self._xrtcp_publisher.is_connected()
-                )
-                self._stats.xrtcp_output_frames = (
-                    self._xrtcp_publisher.output_frames
-                )
-                self._stats.xrtcp_failures = self._xrtcp_publisher.failures
-                self._stats.xrtcp_last_error = (
-                    self._xrtcp_publisher.last_error
-                )
-                self._stats.xrtcp_last_publish_time_ns = (
-                    self._xrtcp_publisher.last_publish_time_ns
-                )
-
     def _set_status(self, status: str) -> None:
-        with self._stats_lock:
-            self._stats.status = status
+        with self._state_lock:
+            self._status = status
+            if status not in {"error"}:
+                self._last_error = ""
 
     def _publish_status(self) -> None:
-        self._refresh_output_status()
+        now_ns = time.time_ns()
+        with self._state_lock:
+            payload: dict[str, Any] = {
+                "status": self._status,
+                "last_error": self._last_error,
+                "transport": "direct_dexcomm",
+                "raw_ros_image_transport": "removed",
+                "output_width": self._output_width,
+                "output_height": self._output_height,
+                "rtc_codec": self._rtc_codec,
+            }
+        if self._rgb_source is not None:
+            stats = self._rgb_source.stats()
+            payload["rgb"] = self._source_status(stats, now_ns)
+        if self._depth_source is not None:
+            stats = self._depth_source.stats()
+            payload["depth"] = self._source_status(stats, now_ns)
+        if self._rtc_worker is not None:
+            payload["rtc"] = self._worker_status(self._rtc_worker)
+            if self._rtc_publisher is not None:
+                try:
+                    payload["rtc"]["connected"] = bool(
+                        self._rtc_publisher.is_connected()
+                    )
+                    payload["rtc"]["subscriber_count"] = int(
+                        self._rtc_publisher.subscriber_count()
+                    )
+                except Exception:
+                    pass
+        if self._xrtcp_worker is not None and self._xrtcp_publisher is not None:
+            payload["xrtcp"] = self._worker_status(self._xrtcp_worker)
+            payload["xrtcp"].update(
+                {
+                    "connected": self._xrtcp_publisher.is_connected(),
+                    "encoder_failures": self._xrtcp_publisher.failures,
+                    "encoder_last_error": self._xrtcp_publisher.last_error,
+                }
+            )
         msg = String()
-        with self._stats_lock:
-            msg.data = json.dumps(self._stats.to_dict(), sort_keys=True)
+        msg.data = json.dumps(payload, sort_keys=True)
         self._status_pub.publish(msg)
 
+    @staticmethod
+    def _source_status(stats: Any, now_ns: int) -> dict[str, Any]:
+        capture_age = (
+            (now_ns - stats.last_source_stamp_ns) / 1.0e9
+            if stats.last_source_stamp_ns
+            else None
+        )
+        receive_age = (
+            (now_ns - stats.last_receive_stamp_ns) / 1.0e9
+            if stats.last_receive_stamp_ns
+            else None
+        )
+        transport_delay = (
+            (stats.last_receive_stamp_ns - stats.last_source_stamp_ns) / 1.0e9
+            if stats.last_source_stamp_ns and stats.last_receive_stamp_ns
+            else None
+        )
+        return {
+            "unique_frames": stats.unique_frames,
+            "invalid_frames": stats.invalid_frames,
+            "source_fps": stats.source_fps,
+            "last_sequence": stats.last_sequence,
+            "capture_age_seconds": capture_age,
+            "receive_age_seconds": receive_age,
+            "transport_delay_seconds": transport_delay,
+            "shape": list(stats.shape) if stats.shape else None,
+            "dtype": stats.dtype,
+            "last_error": stats.last_error,
+        }
+
+    @staticmethod
+    def _worker_status(worker: LatestFrameOutputWorker) -> dict[str, Any]:
+        stats = worker.stats()
+        return {
+            "enqueued_frames": stats.enqueued_frames,
+            "published_frames": stats.published_frames,
+            "replaced_frames": stats.replaced_frames,
+            "failures": stats.failures,
+            "last_sequence": stats.last_sequence,
+            "queue_age_seconds": stats.last_queue_age_seconds,
+            "processing_seconds": stats.last_processing_seconds,
+            "last_error": stats.last_error,
+        }
+
     def _shutdown_io(self) -> None:
-        publisher, self._publisher = self._publisher, None
-        xrtcp_publisher, self._xrtcp_publisher = self._xrtcp_publisher, None
-        camera, self._camera = self._camera, None
-        if publisher is not None:
-            try:
-                publisher.shutdown()
-            except Exception as exc:  # noqa: BLE001
-                self.get_logger().warn(
-                    f"error shutting down RTC publisher: {exc}"
-                )
-        if xrtcp_publisher is not None:
-            try:
-                xrtcp_publisher.shutdown()
-            except Exception as exc:  # noqa: BLE001
-                self.get_logger().warn(
-                    f"error shutting down XRoboToolkit TCP publisher: {exc}"
-                )
-        if camera is not None:
-            try:
-                camera.shutdown()
-            except Exception as exc:  # noqa: BLE001
-                self.get_logger().warn(
-                    f"error shutting down camera sensor: {exc}"
-                )
+        with self._io_lock:
+            rtc_worker, self._rtc_worker = self._rtc_worker, None
+            xrtcp_worker, self._xrtcp_worker = self._xrtcp_worker, None
+            rtc_publisher, self._rtc_publisher = self._rtc_publisher, None
+            xrtcp_publisher, self._xrtcp_publisher = self._xrtcp_publisher, None
+            rgb_source, self._rgb_source = self._rgb_source, None
+            depth_source, self._depth_source = self._depth_source, None
+        for worker in (rtc_worker, xrtcp_worker):
+            if worker is not None:
+                worker.shutdown()
+        for name, publisher in (
+            ("RTC", rtc_publisher),
+            ("XRoboToolkit TCP", xrtcp_publisher),
+        ):
+            if publisher is not None:
+                try:
+                    publisher.shutdown()
+                except Exception as exc:  # noqa: BLE001
+                    self.get_logger().warn(f"error shutting down {name}: {exc}")
+        for source in (rgb_source, depth_source):
+            if source is not None:
+                source.shutdown()
 
     def destroy_node(self) -> None:
         try:
